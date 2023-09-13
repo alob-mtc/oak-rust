@@ -1,18 +1,31 @@
-use std::fmt::{self, Display};
+use std::{
+    any::Any,
+    fmt::{self, Display},
+};
 
 use crate::lexer::token::{Pos, TokKind, Token};
 
-trait AstNode: Display {
+pub trait AstNode: Display {
     fn pos(&self) -> &Pos;
 }
 
-struct EmptyNode {
-    tok: Option<Token>,
+pub trait AstAny {
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl<T: Any> AstAny for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+pub struct EmptyNode {
+    pub tok: Token,
 }
 
 impl AstNode for EmptyNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -22,13 +35,13 @@ impl Display for EmptyNode {
     }
 }
 
-struct NullNode {
-    tok: Option<Token>,
+pub struct NullNode {
+    pub tok: Token,
 }
 
 impl AstNode for NullNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -38,9 +51,9 @@ impl Display for NullNode {
     }
 }
 
-struct StringNode {
-    payload: Vec<u8>,
-    tok: Option<Token>,
+pub struct StringNode {
+    pub payload: Vec<u8>,
+    pub tok: Option<Token>,
 }
 
 impl AstNode for StringNode {
@@ -59,14 +72,14 @@ impl Display for StringNode {
     }
 }
 
-struct IntNode {
-    payload: i64,
-    tok: Option<Token>,
+pub struct IntNode {
+    pub payload: i64,
+    pub tok: Token,
 }
 
 impl AstNode for IntNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -76,14 +89,14 @@ impl Display for IntNode {
     }
 }
 
-struct FloatNode {
-    payload: f64,
-    tok: Option<Token>,
+pub struct FloatNode {
+    pub payload: f64,
+    pub tok: Token,
 }
 
 impl AstNode for FloatNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -93,14 +106,14 @@ impl Display for FloatNode {
     }
 }
 
-struct BoolNode {
-    payload: bool,
-    tok: Option<Token>,
+pub struct BoolNode {
+    pub payload: bool,
+    pub tok: Token,
 }
 
 impl AstNode for BoolNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -110,14 +123,14 @@ impl Display for BoolNode {
     }
 }
 
-struct AtomNode {
-    payload: String,
-    tok: Option<Token>,
+pub struct AtomNode {
+    pub payload: String,
+    pub tok: Token,
 }
 
 impl AstNode for AtomNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -127,14 +140,14 @@ impl Display for AtomNode {
     }
 }
 
-struct ListNode {
-    elems: Vec<Box<dyn Display>>,
-    tok: Option<Token>,
+pub struct ListNode {
+    pub elems: Vec<Box<dyn AstNode>>,
+    pub tok: Token,
 }
 
 impl AstNode for ListNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -152,9 +165,9 @@ impl Display for ListNode {
     }
 }
 
-struct ObjectEntry {
-    key: Box<dyn Display>,
-    val: Box<dyn Display>,
+pub struct ObjectEntry {
+    pub key: Box<dyn AstNode>,
+    pub val: Box<dyn AstNode>,
 }
 
 impl Display for ObjectEntry {
@@ -163,9 +176,15 @@ impl Display for ObjectEntry {
     }
 }
 
-struct ObjectNode {
-    entries: Vec<ObjectEntry>,
-    tok: Option<Token>,
+pub struct ObjectNode {
+    pub entries: Vec<ObjectEntry>,
+    pub tok: Token,
+}
+
+impl AstNode for ObjectNode {
+    fn pos(&self) -> &Pos {
+        &self.tok.pos
+    }
 }
 
 impl Display for ObjectNode {
@@ -182,23 +201,17 @@ impl Display for ObjectNode {
     }
 }
 
-impl AstNode for ObjectNode {
-    fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
-    }
-}
-
-struct FnNode {
-    name: String,
-    args: Vec<String>,
-    rest_arg: String,
-    body: Box<dyn AstNode>,
-    tok: Option<Token>,
+pub struct FnNode {
+    pub name: String,
+    pub args: Vec<String>,
+    pub rest_arg: String,
+    pub body: Box<dyn AstNode>,
+    pub tok: Token,
 }
 
 impl Display for FnNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut head = String::new();
+        let mut head: String;
         if self.name == "" {
             head = "fn".to_string();
         } else {
@@ -218,13 +231,13 @@ impl Display for FnNode {
 
 impl AstNode for FnNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
-struct IdentifierNode {
-    payload: String,
-    tok: Option<Token>,
+pub struct IdentifierNode {
+    pub payload: String,
+    pub tok: Token,
 }
 
 impl Display for IdentifierNode {
@@ -235,23 +248,33 @@ impl Display for IdentifierNode {
 
 impl AstNode for IdentifierNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
-struct AssignmentNode {
-    is_local: bool,
-    left: Box<dyn AstNode>,
-    right: Box<dyn AstNode>,
-    tok: Option<Token>,
+pub struct AssignmentNode {
+    pub is_local: bool,
+    pub left: Option<Box<dyn AstNode>>,
+    pub right: Option<Box<dyn AstNode>>,
+    pub tok: Option<Token>,
 }
 
 impl Display for AssignmentNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self.is_local {
-            return write!(f, "{} := {}", self.left, self.right);
+            return write!(
+                f,
+                "{} := {}",
+                self.left.as_ref().unwrap(),
+                self.right.as_ref().unwrap()
+            );
         }
-        write!(f, "{} <- {}", self.left, self.right)
+        write!(
+            f,
+            "{} <- {}",
+            self.left.as_ref().unwrap(),
+            self.right.as_ref().unwrap()
+        )
     }
 }
 
@@ -279,40 +302,38 @@ impl AstNode for PropertyAccessNode {
     }
 }
 
-struct UnaryNode {
-    op: TokKind,
-    right: Box<dyn AstNode>,
-    tok: Option<Token>,
+pub struct UnaryNode {
+    pub right: Box<dyn AstNode>,
+    pub tok: Token,
 }
 
 impl Display for UnaryNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}{}", self.op, self.right)
+        write!(f, "{}{}", self.tok.kind, self.right)
     }
 }
 
 impl AstNode for UnaryNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
 struct BinaryNode {
-    op: TokKind,
     left: Box<dyn AstNode>,
     right: Box<dyn AstNode>,
-    tok: Option<Token>,
+    tok: Token,
 }
 
 impl Display for BinaryNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "({} {} {})", self.left, self.op, self.right)
+        write!(f, "({} {} {})", self.left, self.tok.kind, self.right)
     }
 }
 
 impl AstNode for BinaryNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 
@@ -386,9 +407,15 @@ impl AstNode for IfExprNode {
     }
 }
 
-struct BlockNode {
-    exprs: Vec<Box<dyn AstNode>>,
-    tok: Option<Token>,
+pub struct BlockNode {
+    pub exprs: Vec<Box<dyn AstNode>>,
+    pub tok: Token,
+}
+
+impl AstNode for BlockNode {
+    fn pos(&self) -> &Pos {
+        &self.tok.pos
+    }
 }
 
 impl Display for BlockNode {
@@ -402,11 +429,5 @@ impl Display for BlockNode {
                 .collect::<Vec<String>>()
                 .join(", ")
         )
-    }
-}
-
-impl AstNode for BlockNode {
-    fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
     }
 }

@@ -1,8 +1,7 @@
-use std::fmt;
+use std::fmt::{self, Display};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Pos {
-    pub file_name: String,
     pub line: i32,
     pub col: i32,
 }
@@ -17,6 +16,12 @@ impl fmt::Display for Pos {
 pub struct Token {
     pub kind: TokKind,
     pub pos: Pos,
+}
+
+impl Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.kind)
+    }
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -72,7 +77,7 @@ pub enum TokKind {
 
 impl fmt::Display for TokKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self {
+        match self {
             TokKind::Comment(payload) => write!(f, "//({payload})"),
             TokKind::Comma => write!(f, ","),
             TokKind::Dot => write!(f, ","),

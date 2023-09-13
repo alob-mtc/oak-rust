@@ -4,7 +4,6 @@ pub struct Tokenizer {
     source: Vec<char>,
     index: usize,
 
-    file_anme: String,
     line: i32,
     col: i32,
 }
@@ -14,7 +13,6 @@ impl Tokenizer {
         Self {
             source: source_string.chars().collect(),
             index: 0,
-            file_anme: "(input)".to_string(),
             line: 1,
             col: 0,
         }
@@ -25,7 +23,6 @@ impl Tokenizer {
 impl Tokenizer {
     fn current_pos(&self) -> Pos {
         Pos {
-            file_name: self.file_anme.clone(),
             line: self.line,
             col: self.col,
         }
@@ -390,7 +387,7 @@ impl Tokenizer {
             }
         }
     }
-    pub fn tokenize(&mut self) -> Vec<Token> {
+    pub fn tokenize(mut self) -> Vec<Token> {
         let mut tokens = Vec::new();
 
         if !self.is_eof() && self.peek() == '#' && self.peek_ahead(1) == '!' {
