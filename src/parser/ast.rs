@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::{
     any::Any,
     fmt::{self, Display},
@@ -337,11 +338,11 @@ impl AstNode for BinaryNode {
     }
 }
 
-struct FnCalNode {
-    r#fn: Box<dyn AstNode>,
-    args: Vec<Box<dyn AstNode>>,
-    rest_arg: Option<Box<dyn AstNode>>,
-    tok: Option<Token>,
+pub struct FnCalNode {
+    pub r#fn: Box<dyn AstNode>,
+    pub args: Vec<Box<dyn AstNode>>,
+    pub rest_arg: Option<Box<dyn AstNode>>,
+    pub tok: Option<Token>,
 }
 
 impl Display for FnCalNode {
@@ -364,13 +365,13 @@ impl AstNode for FnCalNode {
     }
 }
 
-struct IfBranch {
-    target: Box<dyn AstNode>,
-    body: Box<dyn AstNode>,
+pub struct IfBranch {
+    pub target: Box<dyn AstNode>,
+    pub body: Rc<Box<dyn AstNode>>,
 }
 
 impl Display for IfBranch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "{} -> {}",
@@ -380,10 +381,10 @@ impl Display for IfBranch {
     }
 }
 
-struct IfExprNode {
-    cond: Box<dyn AstNode>,
-    branches: Vec<IfBranch>,
-    tok: Option<Token>,
+pub struct IfExprNode {
+    pub cond: Box<dyn AstNode>,
+    pub branches: Vec<IfBranch>,
+    pub tok: Token,
 }
 
 impl Display for IfExprNode {
@@ -403,7 +404,7 @@ impl Display for IfExprNode {
 
 impl AstNode for IfExprNode {
     fn pos(&self) -> &Pos {
-        &self.tok.as_ref().unwrap().pos
+        &self.tok.pos
     }
 }
 

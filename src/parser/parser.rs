@@ -1,5 +1,7 @@
-use std::process::id;
+use std::rc::Rc;
 
+use crate::parser::ast::{FnCalNode, IfBranch, IfExprNode};
+use crate::parser::ScopeCall;
 use crate::{
     error::{Err as AppErr, ErrorReason, Result},
     lexer::token::{Pos, TokKind, Token},
@@ -205,29 +207,23 @@ impl Parser {
 
             TokKind::NumberLiteral(payload) => {
                 if payload.contains(".") {
-                    match payload.parse::<f64>() {
-                        Ok(f) => {
-                            return Ok(Box::new(FloatNode { payload: f, tok }));
-                        }
-                        Err(err) => {
-                            return Err(AppErr {
-                                reason: ErrorReason::System,
-                                message: err.to_string(),
-                                pos: tok.pos,
-                            })
-                        }
+                    return match payload.parse::<f64>() {
+                        Ok(f) => Ok(Box::new(FloatNode { payload: f, tok })),
+                        Err(err) => Err(AppErr {
+                            reason: ErrorReason::System,
+                            message: err.to_string(),
+                            pos: tok.pos,
+                        }),
                     };
                 }
 
                 match payload.parse::<i64>() {
                     Ok(i) => return Ok(Box::new(IntNode { payload: i, tok })),
-                    Err(err) => {
-                        return Err(AppErr {
-                            reason: ErrorReason::System,
-                            message: err.to_string(),
-                            pos: tok.pos,
-                        })
-                    }
+                    Err(err) => Err(AppErr {
+                        reason: ErrorReason::System,
+                        message: err.to_string(),
+                        pos: tok.pos,
+                    }),
                 }
             }
             TokKind::TrueLiteral => Ok(Box::new(BoolNode { payload: true, tok })),
@@ -285,8 +281,8 @@ impl Parser {
             },
             TokKind::LeftBracket => {
                 self.push_min_prec(0);
-                let _ = crate::parser::ScopeCall {
-                    c: Some(|| -> () { self.pop_min_prec() }),
+                let _scope_call = crate::parser::ScopeCall {
+                    c: Some(|| self.pop_min_prec()),
                 };
 
                 let mut item_nodes = Vec::new();
@@ -307,8 +303,8 @@ impl Parser {
 
             TokKind::LeftBrace => {
                 self.push_min_prec(0);
-                let _ = crate::parser::ScopeCall {
-                    c: Some(|| -> () { self.pop_min_prec() }),
+                let _scope_call = crate::parser::ScopeCall {
+                    c: Some(|| self.pop_min_prec()),
                 };
 
                 // empty {} is always considerd an object -- an empty block is illegal
@@ -365,7 +361,7 @@ impl Parser {
             }
             TokKind::FnKeyword => {
                 self.push_min_prec(0);
-                let _ = crate::parser::ScopeCall {
+                let _scope_call = crate::parser::ScopeCall {
                     c: Some(|| -> () { self.pop_min_prec() }),
                 };
 
@@ -449,6 +445,108 @@ impl Parser {
                 let right = self.parse_sub_node()?;
 
                 Ok(Box::new(UnaryNode { right, tok }))
+            }
+            TokKind::IfKeyword => {
+                self.push_min_prec(0);
+                let _scope_call = crate::parser::ScopeCall {
+                    c: Some(|| -> () { self.pop_min_prec() }),
+                };
+
+                let cond_node: Box<dyn AstNode>;
+                let mut branches = Vec::new();
+
+                // if no explicit condition is provided (i.e. if the keyword is
+                // followed by a { ... }), we assume the condition is "true" to allow
+                // for the useful `if { case, case ... }` pattern.
+
+                if self.peek().kind == TokKind::LeftBrace {
+                    cond_node = Box::new(BoolNode {
+                        payload: true,
+                        tok: tok.clone(),
+                    })
+                } else {
+                    cond_node = self.parse_node()?;
+                }
+
+                // `if cond -> body` desugars to `if cond { true -> body }`. Note that
+                // in this form, there can only be one condition expression; `if a, b,
+                // c -> body` is not legal. However, `if a | b | c -> body` is
+                // equivalent and valid.
+                if self.peek().kind == TokKind::BranchArrow {
+                    let arrow_tok = self.next();
+                    let body = self.parse_node()?;
+
+                    // comma here marks end of the ifExpr, not end of branch, so we do
+                    // not consume it here.
+                    branches.push(IfBranch {
+                        target: Box::new(BoolNode {
+                            payload: true,
+                            tok: arrow_tok.clone(),
+                        }),
+                        body: Rc::new(body),
+                    });
+
+                    return Ok(Box::new(IfExprNode {
+                        cond: cond_node,
+                        branches,
+                        tok,
+                    }));
+                }
+
+                self.expect(TokKind::LeftBrace)?;
+
+                while !self.is_eof() && self.peek().kind != TokKind::RightBrace {
+                    let mut targets = Vec::new();
+                    while !self.is_eof() && self.peek().kind != TokKind::BranchArrow {
+                        let target = self.parse_node()?;
+                        if self.peek().kind != TokKind::BranchArrow {
+                            self.expect(TokKind::Comma)?;
+                        }
+                        targets.push(target);
+                    }
+                    self.expect(TokKind::BranchArrow)?;
+                    let body = Rc::new(self.parse_node()?);
+                    self.expect(TokKind::Comma)?;
+
+                    // We want to support multi-target branches, but don't want to
+                    // incur the performance overhead in the interpreter/evaluator of
+                    // keeping every single target as a Go slice, when the vast
+                    // majority of targets will be single-value, which requires just a
+                    // pointer to an astNode.
+                    //
+                    // So instead of doing that, we penalize the multi-value case by
+                    // essentially considering it syntax sugar and splitting such
+                    // branches into multiple AST branches, each with one target value.
+                    for target in targets {
+                        branches.push(IfBranch {
+                            target,
+                            body: body.clone(),
+                        })
+                    }
+                }
+                self.expect(TokKind::RightBrace)?;
+                Ok(Box::new(IfExprNode {
+                    cond: cond_node,
+                    branches,
+                    tok,
+                }))
+            }
+            TokKind::WithKeyword => {
+                self.push_min_prec(0);
+                let _scope_call = ScopeCall {
+                    c: Some(|| -> () { self.pop_min_prec() }),
+                };
+
+                let with_expr_base = self.parse_node()?;
+
+                let with_expr_base_call = self.as_any().downcast_ref::<FnCalNode>().ok_or(AppErr {
+                    reason: ErrorReason::Syntax,
+                    message: "with keyword should be followed by a function call, found %s"
+                        .to_string(),
+                    pos: tok.pos,
+                });
+
+                todo!()
             }
             _ => todo!(),
         }
