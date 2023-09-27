@@ -5,7 +5,7 @@ mod parser;
 fn main() {
     let source_string = String::from(
         r#"
-        // fibonacci sequence
+// fibonacci sequence
 
 {
 	println: println
