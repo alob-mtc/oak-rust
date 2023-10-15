@@ -1,11 +1,8 @@
 use std::fmt::Formatter;
+use std::fmt::{self, Display};
 use std::rc::Rc;
-use std::{
-    any::Any,
-    fmt::{self, Display},
-};
 
-use crate::lexer::token::{Pos, TokKind, Token};
+use crate::lexer::token::{Pos, Token};
 
 pub trait AstNode: Display {
     fn pos(&self) -> Option<&Pos>;
