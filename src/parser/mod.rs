@@ -1,5 +1,5 @@
 mod ast;
-mod parser;
+pub mod parser;
 struct ScopeCall<F: FnMut()> {
     c: Option<F>,
 }

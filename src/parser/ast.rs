@@ -8,6 +8,7 @@ pub trait AstNode: Display {
     fn pos(&self) -> Option<&Pos>;
 }
 
+#[derive(Debug)]
 pub enum Node {
     EmptyNode {
         tok: Token,

@@ -13,7 +13,7 @@ pub struct Parser {
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
+    pub fn new(tokens: Vec<Token>) -> Self {
         Self {
             tokens,
             index: 0,
@@ -135,14 +135,17 @@ impl Parser {
         }
 
         let next = self.next().clone();
-        let node = Node::AssignmentNode {
+        let mut node = Node::AssignmentNode {
             is_local: next.kind == TokKind::Assign,
             left: Box::new(left),
             right: None,
             tok: next,
         };
 
-        // TODO: generate right node
+        match &mut node {
+            Node::AssignmentNode { right, .. } => *right = Some(Box::new(self.parse_node()?)),
+            _ => {}
+        }
 
         Ok(node)
     }
@@ -289,6 +292,10 @@ impl Parser {
                     tok,
                 })
             }()
+            .and_then(|node| -> Result<Node> {
+                self.pop_min_prec();
+                Ok(node)
+            })
             .or_else(|err| -> Result<Node> {
                 self.pop_min_prec();
                 Err(err)
@@ -352,6 +359,10 @@ impl Parser {
                     self.expect(TokKind::RightBrace)?;
                     return Ok(Node::BlockNode { exprs, tok });
                 }()
+                .and_then(|node| -> Result<Node> {
+                    self.pop_min_prec();
+                    Ok(node)
+                })
                 .or_else(|err| -> Result<Node> {
                     self.pop_min_prec();
                     Err(err)
@@ -429,6 +440,10 @@ impl Parser {
                         tok,
                     })
                 }()
+                .and_then(|node| -> Result<Node> {
+                    self.pop_min_prec();
+                    Ok(node)
+                })
                 .or_else(|err| -> Result<Node> {
                     self.pop_min_prec();
                     Err(err)
@@ -530,6 +545,10 @@ impl Parser {
                         tok,
                     })
                 }()
+                .and_then(|node| -> Result<Node> {
+                    self.pop_min_prec();
+                    Ok(node)
+                })
                 .or_else(|err| -> Result<Node> {
                     self.pop_min_prec();
                     Err(err)
@@ -553,6 +572,10 @@ impl Parser {
                     }),
                 }
             }()
+            .and_then(|node| -> Result<Node> {
+                self.pop_min_prec();
+                Ok(node)
+            })
             .or_else(|err| -> Result<Node> {
                 self.pop_min_prec();
                 Err(err)
@@ -574,6 +597,10 @@ impl Parser {
 
                     Ok(Node::BlockNode { exprs, tok })
                 }()
+                .and_then(|node| -> Result<Node> {
+                    self.pop_min_prec();
+                    Ok(node)
+                })
                 .or_else(|err| -> Result<Node> {
                     self.pop_min_prec();
                     Err(err)
@@ -637,6 +664,10 @@ impl Parser {
 
             Ok(node)
         }()
+        .and_then(|node| -> Result<Node> {
+            self.pop_min_prec();
+            Ok(node)
+        })
         .or_else(|err| -> Result<Node> {
             self.pop_min_prec();
             Err(err)
@@ -739,15 +770,12 @@ impl Parser {
         return Ok(node);
     }
 
-    fn parse(mut self) -> Result<Vec<Node>> {
+    pub fn parse(mut self) -> Result<Vec<Node>> {
         let mut nodes = Vec::new();
 
-        while self.is_eof() {
+        while !self.is_eof() {
             let node = self.parse_node()?;
-            if self.expect(TokKind::Comma).is_err() {
-                return Ok(nodes);
-            }
-
+            self.expect(TokKind::Comma)?;
             nodes.push(node);
         }
 

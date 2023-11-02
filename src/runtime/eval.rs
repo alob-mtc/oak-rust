@@ -3,6 +3,8 @@ use core::fmt;
 // internal values
 const EMPTY: Value = Value::Empty;
 const NULL: Value = Value::Null;
+const TRUE: Value = Value::Bool(true);
+const FALSE: Value = Value::Bool(false);
 
 // return the max of two slices
 fn max_len(a: &[u8], b: &[u8]) -> usize {
