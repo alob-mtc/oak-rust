@@ -1,18 +1,15 @@
 use std::fmt::{self, Display};
 
-#[derive(Debug, Clone, Default)]
-pub struct Pos {
-    pub line: i32,
-    pub col: i32,
-}
+#[derive(PartialEq, Debug, Clone, Default)]
+pub struct Pos(pub usize, pub usize);
 
 impl fmt::Display for Pos {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[{}:{}]", self.line, self.col)
+        write!(f, "[{}:{}]", self.0, self.1)
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct Token {
     pub kind: TokKind,
     pub pos: Pos,
@@ -66,7 +63,7 @@ pub enum TokKind {
     IfKeyword,
     FnKeyword,
     WithKeyword,
-    // identidifiers and literals
+    // identifiers and literals
     Underscore,
     Identifiers(String),
     TrueLiteral,
@@ -75,12 +72,23 @@ pub enum TokKind {
     NumberLiteral(String),
 }
 
+pub fn lookup_ident(ident: &str) -> TokKind {
+    match ident {
+        "fn" => TokKind::FnKeyword,
+        "true" => TokKind::TrueLiteral,
+        "false" => TokKind::FalseLiteral,
+        "if" => TokKind::IfKeyword,
+        "with" => TokKind::WithKeyword,
+        _ => TokKind::Identifiers(ident.to_string()),
+    }
+}
+
 impl fmt::Display for TokKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TokKind::Comment(payload) => write!(f, "//({payload})"),
             TokKind::Comma => write!(f, ","),
-            TokKind::Dot => write!(f, ","),
+            TokKind::Dot => write!(f, "."),
             TokKind::LeftParan => write!(f, "("),
             TokKind::RightParan => write!(f, ")"),
             TokKind::LeftBracket => write!(f, "["),
