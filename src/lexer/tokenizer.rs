@@ -1,507 +1,360 @@
-use super::token::{Pos, TokKind, Token};
+use super::token::{lookup_ident, Pos, TokKind, Token};
+use crate::error::error::{Error, Result};
+use crate::utils::utils::log_debug;
+use std::io::{BufRead, BufReader};
+
+use lazy_static::lazy_static;
+use regex::Regex;
+
+lazy_static! {
+    static ref IDENTIFIER_REGEX: Regex =
+        Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("regex Identifiers pattern is valid");
+    static ref NUMBER_REGEX: Regex =
+        Regex::new(r"^[+-]?\d+(_\d+)*(\.\d+)?$").expect("regex number pattern is valid");
+}
 
 pub struct Tokenizer {
     source: Vec<char>,
     index: usize,
 
-    line: i32,
-    col: i32,
+    line: usize,
+    col: usize,
 }
 
-impl Tokenizer {
-    pub fn new(source_string: String) -> Self {
-        Self {
-            source: source_string.chars().collect(),
-            index: 0,
-            line: 1,
-            col: 0,
-        }
-    }
-}
+fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>> {
+    let mut tokens = Vec::new();
 
-// utils
-impl Tokenizer {
-    fn current_pos(&self) -> Pos {
-        Pos {
-            line: self.line,
-            col: self.col,
-        }
-    }
-
-    fn is_eof(&self) -> bool {
-        self.index == self.source.len()
-    }
-
-    fn peek(&self) -> char {
-        self.source[self.index]
-    }
-
-    fn peek_ahead(&self, n: usize) -> char {
-        if self.index + n > self.source.len() {
-            // In oak, whitespace is insignificant, so we return it as the nothing
-            return ' ';
-        }
-        return self.source[self.index + n];
-    }
-
-    fn next(&mut self) -> char {
-        let ch = self.source[self.index];
-
-        if self.index < self.source.len() {
-            self.index += 1;
+    // read a complete line
+    let mut line = 1;
+    'out: for _line in unbuffered.lines() {
+        let buf = _line.map_err(|e| Error::System(e.to_string()))?;
+        // shebang-style ignored line, keep taking until EOL
+        if buf.starts_with("#!") || buf.is_empty() {
+            line += 1;
+            continue;
         }
 
-        if ch == '\n' {
-            self.line += 1;
-            self.col = 0;
-        }
+        let mut buf_iter = buf.chars().into_iter().enumerate().peekable();
+        while let Some((col, ch)) = buf_iter.next() {
+            let commit_token = |tok: TokKind, tokens| {
+                commit(
+                    Token {
+                        kind: tok,
+                        pos: Pos(line, col + 1),
+                    },
+                    tokens,
+                    debug,
+                )
+            };
 
-        ch
-    }
-
-    fn back(&mut self) {
-        if self.index > 0 {
-            self.index -= 1;
-        }
-        if self.source[self.index] == '\n' {
-            self.line -= 1;
-            // TODO: reset col correctly -> not obvious way to do this
-        } else {
-            self.col -= 0;
-        }
-    }
-
-    fn read_until_char(&mut self, c: char) -> String {
-        let mut accumulator = String::new();
-        while !self.is_eof() && self.peek() != c {
-            accumulator.push(self.next());
-        }
-
-        accumulator
-    }
-
-    fn read_valid_indentifier(&mut self) -> String {
-        let mut accumulator = String::new();
-        loop {
-            if self.is_eof() {
-                break;
-            }
-
-            let ch = self.next();
-            if ch.is_ascii_lowercase()
-                || ch.is_ascii_uppercase()
-                || ch == '_'
-                || ch == '?'
-                || ch == '!'
-            {
-                accumulator.push(ch);
-            } else {
-                self.back();
-                break;
-            }
-        }
-
-        accumulator
-    }
-
-    fn read_valid_numeral(&mut self) -> String {
-        let mut saw_dot = false;
-        let mut accumulator = String::new();
-        loop {
-            if self.is_eof() {
-                break;
-            }
-
-            let ch = self.next();
-            if ch.is_ascii_digit() {
-                accumulator.push(ch);
-            } else if ch == '.' && !saw_dot {
-                saw_dot = true;
-                accumulator.push(ch)
-            } else {
-                self.back();
-                break;
-            }
-        }
-
-        accumulator
-    }
-}
-
-impl Tokenizer {
-    fn next_token(&mut self) -> Token {
-        let ch = self.next();
-
-        match ch {
-            ',' => Token {
-                kind: TokKind::Comma,
-                pos: self.current_pos(),
-            },
-            '.' => {
-                if !self.is_eof() && self.peek() == '.' && self.peek_ahead(1) == '.' {
-                    let pos = self.current_pos();
-                    self.next();
-                    self.next();
-                    return Token {
-                        kind: TokKind::Elispe,
-                        pos,
-                    };
-                }
-                Token {
-                    kind: TokKind::Dot,
-                    pos: self.current_pos(),
-                }
-            }
-            '(' => Token {
-                kind: TokKind::LeftParan,
-                pos: self.current_pos(),
-            },
-            ')' => Token {
-                kind: TokKind::RightParan,
-                pos: self.current_pos(),
-            },
-            '[' => Token {
-                kind: TokKind::LeftBracket,
-                pos: self.current_pos(),
-            },
-            ']' => Token {
-                kind: TokKind::RightBracket,
-                pos: self.current_pos(),
-            },
-            '{' => Token {
-                kind: TokKind::LeftBrace,
-                pos: self.current_pos(),
-            },
-            '}' => Token {
-                kind: TokKind::RightBrace,
-                pos: self.current_pos(),
-            },
-            ':' => {
-                if !self.is_eof() && self.peek() == '=' {
-                    let pos = self.current_pos();
-                    self.next();
-                    return Token {
-                        kind: TokKind::Assign,
-                        pos,
-                    };
-                }
-                Token {
-                    kind: TokKind::Colon,
-                    pos: self.current_pos(),
-                }
-            }
-            '<' => {
-                if !self.is_eof() {
-                    let ch = self.peek();
-                    if ch == '<' {
-                        self.next();
-                        return Token {
-                            kind: TokKind::PushArrow,
-                            pos: self.current_pos(),
-                        };
-                    } else if ch == '-' {
-                        self.next();
-                        return Token {
-                            kind: TokKind::NonlocalAssign,
-                            pos: self.current_pos(),
-                        };
-                    } else if ch == '=' {
-                        self.next();
-                        return Token {
-                            kind: TokKind::Leq,
-                            pos: self.current_pos(),
-                        };
+            match ch {
+                '\t' | '\r' | ' ' => {}
+                ',' => commit_token(TokKind::Comma, &mut tokens),
+                '.' => {
+                    if let Some((_, '.')) = buf_iter.peek() {
+                        buf_iter.next();
+                        if let Some((_, '.')) = buf_iter.peek() {
+                            buf_iter.next();
+                            commit_token(TokKind::Elispe, &mut tokens);
+                        }
+                    } else {
+                        commit_token(TokKind::Dot, &mut tokens);
                     }
                 }
-                Token {
-                    kind: TokKind::Less,
-                    pos: self.current_pos(),
+                '_' => commit_token(TokKind::Underscore, &mut tokens),
+                '(' => commit_token(TokKind::LeftParan, &mut tokens),
+                ')' => commit_token(TokKind::RightParan, &mut tokens),
+                '[' => commit_token(TokKind::LeftBracket, &mut tokens),
+                ']' => commit_token(TokKind::RightBracket, &mut tokens),
+                '{' => commit_token(TokKind::LeftBrace, &mut tokens),
+                '}' => commit_token(TokKind::RightBrace, &mut tokens),
+                ':' => {
+                    if let Some((_, '=')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::Assign, &mut tokens);
+                    } else {
+                        commit_token(TokKind::Colon, &mut tokens);
+                    }
                 }
-            }
-            '?' => Token {
-                kind: TokKind::Qmark,
-                pos: self.current_pos(),
-            },
-            '!' => {
-                if !self.is_eof() && self.peek() == '=' {
-                    self.next();
-                    return Token {
-                        kind: TokKind::Neq,
-                        pos: self.current_pos(),
-                    };
+                '<' => {
+                    if let Some((_, '<')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::PushArrow, &mut tokens);
+                    } else if let Some((_, '-')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::NonlocalAssign, &mut tokens);
+                    } else if let Some((_, '=')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::Leq, &mut tokens);
+                    } else {
+                        commit_token(TokKind::Less, &mut tokens);
+                    }
                 }
-                Token {
-                    kind: TokKind::Exclam,
-                    pos: self.current_pos(),
+                '?' => commit_token(TokKind::Qmark, &mut tokens),
+                '!' => {
+                    if let Some((_, '=')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::Neq, &mut tokens);
+                    } else {
+                        commit_token(TokKind::Exclam, &mut tokens);
+                    }
                 }
-            }
-            '+' => Token {
-                kind: TokKind::Plus,
-                pos: self.current_pos(),
-            },
-            '-' => {
-                if !self.is_eof() && self.peek() == '>' {
-                    self.next();
-                    return Token {
-                        kind: TokKind::BranchArrow,
-                        pos: self.current_pos(),
-                    };
+                '+' => commit_token(TokKind::Plus, &mut tokens),
+                '-' => {
+                    if let Some((_, '>')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::BranchArrow, &mut tokens);
+                    } else {
+                        commit_token(TokKind::Minus, &mut tokens);
+                    }
                 }
-                Token {
-                    kind: TokKind::Minus,
-                    pos: self.current_pos(),
+                '/' => {
+                    if let Some((_, '/')) = buf_iter.peek() {
+                        buf_iter.next();
+                        let comment_string = buf_iter
+                            .map(|(_, ch)| ch)
+                            .collect::<String>()
+                            .trim()
+                            .to_string();
+                        commit_token(TokKind::Comment(comment_string), &mut tokens);
+                        continue 'out;
+                    } else {
+                        commit_token(TokKind::Divide, &mut tokens);
+                    }
                 }
-            }
-            '*' => Token {
-                kind: TokKind::Times,
-                pos: self.current_pos(),
-            },
-            '/' => {
-                if !self.is_eof() && self.peek() == '/' {
-                    let pos = self.current_pos();
-                    self.next();
-                    let comment_string = self.read_until_char('\n');
-                    return Token {
-                        kind: TokKind::Comment(comment_string),
-                        pos,
-                    };
+                '%' => commit_token(TokKind::Modulus, &mut tokens),
+                '^' => commit_token(TokKind::Xor, &mut tokens),
+                '&' => commit_token(TokKind::And, &mut tokens),
+                '|' => {
+                    if let Some((_, '>')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::PipeArrow, &mut tokens);
+                    } else {
+                        commit_token(TokKind::Or, &mut tokens);
+                    }
                 }
-                Token {
-                    kind: TokKind::Divide,
-                    pos: self.current_pos(),
+                '>' => {
+                    if let Some((_, '=')) = buf_iter.peek() {
+                        buf_iter.next();
+                        commit_token(TokKind::Geq, &mut tokens);
+                    } else {
+                        commit_token(TokKind::Greater, &mut tokens);
+                    }
                 }
-            }
-            '%' => Token {
-                kind: TokKind::Modulus,
-                pos: self.current_pos(),
-            },
-            '^' => Token {
-                kind: TokKind::Xor,
-                pos: self.current_pos(),
-            },
-            '&' => Token {
-                kind: TokKind::And,
-                pos: self.current_pos(),
-            },
-            '|' => {
-                if !self.is_eof() && self.peek() == '>' {
-                    self.next();
-                    return Token {
-                        kind: TokKind::PipeArrow,
-                        pos: self.current_pos(),
-                    };
-                }
-                Token {
-                    kind: TokKind::Or,
-                    pos: self.current_pos(),
-                }
-            }
-            '>' => {
-                if !self.is_eof() && self.peek() == '=' {
-                    self.next();
-                    return Token {
-                        kind: TokKind::Geq,
-                        pos: self.current_pos(),
-                    };
-                }
-                Token {
-                    kind: TokKind::Greater,
-                    pos: self.current_pos(),
-                }
-            }
-            '=' => Token {
-                kind: TokKind::Eq,
-                pos: self.current_pos(),
-            },
-            '\'' => {
-                let pos = self.current_pos();
-                let mut accumulator = String::new();
-                while !self.is_eof() && self.peek() != '\'' {
-                    let mut ch = self.next();
-                    if ch == '\\' {
-                        accumulator.push(ch);
-                        if self.is_eof() {
+                '=' => commit_token(TokKind::Eq, &mut tokens),
+                '\'' => {
+                    let mut accumulator = String::new();
+                    while let Some((_, ch)) = buf_iter.next() {
+                        if ch == '\'' {
                             break;
-                        } else {
-                            ch = self.next();
                         }
+                        accumulator.push(ch);
                     }
-                    accumulator.push(ch);
+                    commit_token(TokKind::StringLiteral(accumulator), &mut tokens);
                 }
-                if self.is_eof() {
-                    return Token {
-                        kind: TokKind::StringLiteral(accumulator),
-                        pos,
-                    };
-                }
+                _ => {
+                    let mut entry = String::from(ch);
+                    while let Some(&(_, c)) = buf_iter.peek() {
+                        let mut tmp_entry = String::from(entry.clone());
+                        // support http.Server()
+                        if IDENTIFIER_REGEX.is_match(&tmp_entry) && !c.is_ascii_alphabetic() {
+                            break;
+                        }
 
-                self.next(); // read ending quote
-                return Token {
-                    kind: TokKind::StringLiteral(accumulator),
-                    pos,
-                };
-            }
-            '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
-                let pos = self.current_pos();
-                let mut payload = ch.to_string();
-                payload.push_str(&self.read_valid_numeral());
-                Token {
-                    kind: TokKind::NumberLiteral(payload),
-                    pos,
-                }
-            }
-            _ => {
-                let pos = self.current_pos();
-                let mut payload = ch.to_string();
-                payload.push_str(&self.read_valid_indentifier());
-                match &payload[..] {
-                    "_" => Token {
-                        kind: TokKind::Underscore,
-                        pos,
-                    },
-                    "if" => Token {
-                        kind: TokKind::IfKeyword,
-                        pos,
-                    },
-                    "fn" => Token {
-                        kind: TokKind::FnKeyword,
-                        pos,
-                    },
-                    "with" => Token {
-                        kind: TokKind::WithKeyword,
-                        pos,
-                    },
-                    "true" => Token {
-                        kind: TokKind::TrueLiteral,
-                        pos,
-                    },
-                    "false" => Token {
-                        kind: TokKind::FalseLiteral,
-                        pos,
-                    },
-                    _ => Token {
-                        kind: TokKind::Identifiers(payload),
-                        pos,
-                    },
+                        tmp_entry.push(c.clone());
+                        // Break the loop if the next character does not continue a valid number or Identifiers
+                        // and is neither a '.' nor a '_'
+                        if !NUMBER_REGEX.is_match(&tmp_entry)
+                            && !IDENTIFIER_REGEX.is_match(&tmp_entry)
+                            && (c != '.' && c != '_')
+                        {
+                            break;
+                        }
+
+                        // Advance the iterator and update 'entry'
+                        buf_iter.next();
+                        entry = tmp_entry;
+                    }
+
+                    // Determine the token type based on the final 'entry' string
+                    if NUMBER_REGEX.is_match(&entry) {
+                        // Handle numeric token
+                        commit(
+                            Token {
+                                kind: TokKind::NumberLiteral(entry.replace("_", "")),
+                                pos: Pos(line, col),
+                            },
+                            &mut tokens,
+                            debug,
+                        );
+                    } else if IDENTIFIER_REGEX.is_match(&entry) {
+                        // Handle Identifiers token
+                        commit(
+                            Token {
+                                kind: lookup_ident(&entry),
+                                pos: Pos(line, col),
+                            },
+                            &mut tokens,
+                            debug,
+                        )
+                    }
                 }
             }
         }
+        line += 1;
     }
-    pub fn tokenize(mut self) -> Vec<Token> {
-        let mut tokens = Vec::new();
+    Ok(tokens)
+}
 
-        if !self.is_eof() && self.peek() == '#' && self.peek_ahead(1) == '!' {
-            // shebang-stile ignored line, keep takeing untill EOL
-            self.read_until_char('\n');
-            if !self.is_eof() {
-                self.next();
-            }
-        }
+fn commit(tok: Token, tokens: &mut Vec<Token>, debug: bool) {
+    if debug {
+        log_debug(&format!("-> {} {}\n", tok, tok.pos));
+    }
+    tokens.push(tok);
+}
 
-        // snip whitespace before
-        while !self.is_eof() && self.peek().is_ascii_whitespace() {
-            self.next();
-        }
+// tests
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        let mut last = Token {
-            kind: TokKind::Comma,
-            pos: self.current_pos(),
-        };
-        while !self.is_eof() {
-            let mut next = self.next_token();
-
-            if (last.kind != TokKind::LeftParan
-                && last.kind != TokKind::LeftBracket
-                && last.kind != TokKind::LeftBrace
-                && last.kind != TokKind::Comma)
-                && (next.kind == TokKind::RightParan
-                    || next.kind == TokKind::RightBracket
-                    || next.kind == TokKind::RightBrace)
-            {
-                tokens.push(Token {
-                    kind: TokKind::Comma,
-                    pos: self.current_pos(),
+    #[test]
+    fn test_tokenize() {
+        let source_string: &[u8] = b"
+        std := import('std')
+        fmt := import('fmt')
+        http := import('http')
+        
+        server := http.Server()
+        with server.route('/hello/:name') fn(params) {
+            fn(req, end) if req.method {
+                'GET' -> end({
+                    status: 200
+                    body: fmt.format('Hello, {{ 0 }}!'
+                        std.default(params.name, 'World'))
                 })
-            }
-
-            match &next.kind {
-                TokKind::Comment(_) => {
-                    next.kind = last.kind.clone();
-                    next.pos = last.pos.clone()
-                }
-                _ => tokens.push(next.clone()),
-            }
-
-            // snip whitespace after
-            while !self.is_eof() && self.peek().is_ascii_whitespace() {
-                if self.peek() == '\n' {
-                    match &next.kind {
-                        TokKind::Comment(_)
-                        | TokKind::Comma
-                        | TokKind::Dot
-                        | TokKind::LeftParan
-                        | TokKind::RightParan
-                        | TokKind::LeftBracket
-                        | TokKind::RightBracket
-                        | TokKind::LeftBrace
-                        | TokKind::RightBrace
-                        | TokKind::Assign
-                        | TokKind::NonlocalAssign
-                        | TokKind::PipeArrow
-                        | TokKind::BranchArrow
-                        | TokKind::PushArrow
-                        | TokKind::Colon
-                        | TokKind::Elispe
-                        | TokKind::Qmark
-                        | TokKind::Exclam
-                        | TokKind::Plus
-                        | TokKind::Minus
-                        | TokKind::Times
-                        | TokKind::Divide
-                        | TokKind::Modulus
-                        | TokKind::Xor
-                        | TokKind::And
-                        | TokKind::Or
-                        | TokKind::Greater
-                        | TokKind::Less
-                        | TokKind::Eq
-                        | TokKind::Geq
-                        | TokKind::Leq
-                        | TokKind::Neq
-                        | TokKind::IfKeyword
-                        | TokKind::FnKeyword
-                        | TokKind::WithKeyword
-                        | TokKind::Underscore
-                        | TokKind::Identifiers(_)
-                        | TokKind::TrueLiteral
-                        | TokKind::FalseLiteral
-                        | TokKind::StringLiteral(_)
-                        | TokKind::NumberLiteral(_) => {}
-                        _ => {
-                            next = Token {
-                                kind: TokKind::Comma,
-                                pos: self.current_pos(),
-                            }
-                        }
-                    }
-                }
-                self.next();
-            }
-
-            match &next.kind {
-                TokKind::Comment(_) => {}
-                _ => last = next,
+                _ -> end(http.MethodNotAllowed)
             }
         }
+        
+        PORT := 9999
+        std.println('server listing on port:', PORT)
+        server.start(PORT)
+";
 
-        match &last.kind {
-            TokKind::Comment(_) => {}
-            _ => tokens.push(Token {
-                kind: TokKind::Comma,
-                pos: self.current_pos(),
-            }),
-        }
+        let mut reader = std::io::BufReader::new(source_string);
+        let output = tokenize(&mut reader, true)
+            .unwrap()
+            .iter()
+            .map(|tok| tok.kind.clone())
+            .collect::<Vec<TokKind>>();
 
-        tokens
+        let expected_output = vec![
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("import".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("std".to_string()),
+            TokKind::RightParan,
+            TokKind::Identifiers("fmt".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("import".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("fmt".to_string()),
+            TokKind::RightParan,
+            TokKind::Identifiers("http".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("import".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("http".to_string()),
+            TokKind::RightParan,
+            TokKind::Identifiers("server".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("http".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("Server".to_string()),
+            TokKind::LeftParan,
+            TokKind::RightParan,
+            TokKind::WithKeyword,
+            TokKind::Identifiers("server".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("route".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("/hello/:name".to_string()),
+            TokKind::RightParan,
+            TokKind::FnKeyword,
+            TokKind::LeftParan,
+            TokKind::Identifiers("params".to_string()),
+            TokKind::RightParan,
+            TokKind::LeftBrace,
+            TokKind::FnKeyword,
+            TokKind::LeftParan,
+            TokKind::Identifiers("req".to_string()),
+            TokKind::Comma,
+            TokKind::Identifiers("end".to_string()),
+            TokKind::RightParan,
+            TokKind::IfKeyword,
+            TokKind::Identifiers("req".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("method".to_string()),
+            TokKind::LeftBrace,
+            TokKind::StringLiteral("GET".to_string()),
+            TokKind::BranchArrow,
+            TokKind::Identifiers("end".to_string()),
+            TokKind::LeftParan,
+            TokKind::LeftBrace,
+            TokKind::Identifiers("status".to_string()),
+            TokKind::Colon,
+            TokKind::NumberLiteral("200".to_string()),
+            TokKind::Identifiers("body".to_string()),
+            TokKind::Colon,
+            TokKind::Identifiers("fmt".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("format".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("Hello, {{ 0 }}!".to_string()),
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("default".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("params".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("name".to_string()),
+            TokKind::Comma,
+            TokKind::StringLiteral("World".to_string()),
+            TokKind::RightParan,
+            TokKind::RightParan,
+            TokKind::RightBrace,
+            TokKind::RightParan,
+            TokKind::Underscore,
+            TokKind::BranchArrow,
+            TokKind::Identifiers("end".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("http".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("MethodNotAllowed".to_string()),
+            TokKind::RightParan,
+            TokKind::RightBrace,
+            TokKind::RightBrace,
+            TokKind::Identifiers("PORT".to_string()),
+            TokKind::Assign,
+            TokKind::NumberLiteral("9999".to_string()),
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("println".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("server listing on port:".to_string()),
+            TokKind::Comma,
+            TokKind::Identifiers("PORT".to_string()),
+            TokKind::RightParan,
+            TokKind::Identifiers("server".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("start".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("PORT".to_string()),
+            TokKind::RightParan,
+        ];
+
+        assert_eq!(output, expected_output);
     }
 }
