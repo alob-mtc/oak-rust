@@ -2,12 +2,13 @@ use std::rc::Rc;
 
 use crate::parser::ast::Node;
 use crate::{
-    error::{Err as AppErr, ErrorReason, Result},
+    error::error::{Error, Result},
     lexer::token::{Pos, TokKind, Token},
 };
 
 pub struct Parser {
     tokens: Vec<Token>,
+    nodes: Vec<Node>,
     index: i32,
     min_binary_prec: Vec<i32>,
 }
@@ -16,6 +17,7 @@ impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self {
             tokens,
+            nodes: Vec::new(),
             index: 0,
             min_binary_prec: Vec::new(),
         }
@@ -69,13 +71,22 @@ impl Parser {
         }
     }
 
+    fn handle_pop_case(&mut self, node: Result<Node>) -> Result<Node> {
+        node.and_then(|node| -> Result<Node> {
+            self.pop_min_prec();
+            Ok(node)
+        })
+        .or_else(|err| -> Result<Node> {
+            self.pop_min_prec();
+            Err(err)
+        })
+    }
+
     fn expect(&mut self, kind: TokKind) -> Result<&Token> {
         if self.is_eof() {
-            return Err(AppErr {
-                reason: ErrorReason::Syntax,
-                message: format!("unexpted end of input, expected {kind}"),
-                pos: Pos::default(),
-            });
+            return Err(Error::Syntax(format!(
+                "unexpted end of input, expected {kind}"
+            )));
         }
 
         let next = self.next();
@@ -89,11 +100,9 @@ impl Parser {
         };
 
         if !valid {
-            return Err(AppErr {
-                reason: ErrorReason::Syntax,
-                message: format!("unexpted token {next}, expected {kind}"),
-                pos: next.pos.clone(),
-            });
+            return Err(Error::Syntax(format!(
+                "unexpted token {next}, expected {kind}"
+            )));
         }
 
         Ok(next)
@@ -127,29 +136,7 @@ impl Parser {
     }
 }
 
-// concrete AstNode parse functions
 impl Parser {
-    fn parse_assignment(&mut self, left: Node) -> Result<Node> {
-        if self.peek().kind != TokKind::Assign && self.peek().kind != TokKind::NonlocalAssign {
-            return Ok(left);
-        }
-
-        let next = self.next().clone();
-        let mut node = Node::AssignmentNode {
-            is_local: next.kind == TokKind::Assign,
-            left: Box::new(left),
-            right: None,
-            tok: next,
-        };
-
-        match &mut node {
-            Node::AssignmentNode { right, .. } => *right = Some(Box::new(self.parse_node()?)),
-            _ => {}
-        }
-
-        Ok(node)
-    }
-
     // parseUnit is responsible for parsing the smallest complete syntactic "units"
     // of Oak's syntax, like literals including function literals, grouped
     // expressions in blocks, and if/with expressions.
@@ -205,21 +192,13 @@ impl Parser {
                 if payload.contains(".") {
                     return match payload.parse::<f64>() {
                         Ok(f) => Ok(Node::FloatNode { payload: f, tok }),
-                        Err(err) => Err(AppErr {
-                            reason: ErrorReason::System,
-                            message: err.to_string(),
-                            pos: tok.pos,
-                        }),
+                        Err(err) => Err(Error::System(err.to_string())),
                     };
                 }
 
                 match payload.parse::<i64>() {
                     Ok(i) => return Ok(Node::IntNode { payload: i, tok }),
-                    Err(err) => Err(AppErr {
-                        reason: ErrorReason::System,
-                        message: err.to_string(),
-                        pos: tok.pos,
-                    }),
+                    Err(err) => Err(Error::System(err.to_string())),
                 }
             }
             TokKind::TrueLiteral => Ok(Node::BoolNode { payload: true, tok }),
@@ -269,40 +248,35 @@ impl Parser {
                         tok,
                     });
                 }
-                _ => Err(AppErr {
-                    reason: ErrorReason::Syntax,
-                    message: format!("expected identifier after ':', got {}", self.peek()),
-                    pos: tok.pos,
-                }),
+                _ => Err(Error::Syntax(format!(
+                    "expected identifier after ':', got {}",
+                    self.peek()
+                ))),
             },
-            TokKind::LeftBracket => || -> Result<Node> {
-                self.push_min_prec(0);
+            TokKind::LeftBracket => {
+                let scope = || -> Result<Node> {
+                    self.push_min_prec(0);
 
-                let mut item_nodes = Vec::new();
-                while !self.is_eof() && self.peek().kind != TokKind::RightBracket {
-                    let node = self.parse_node()?;
-                    self.expect(TokKind::Comma)?;
-                    item_nodes.push(node);
-                }
+                    let mut item_nodes = Vec::new();
+                    while !self.is_eof() && self.peek().kind != TokKind::RightBracket {
+                        let node = self.parse_node()?;
+                        self.expect(TokKind::Comma)?;
+                        item_nodes.push(node);
+                    }
 
-                self.expect(TokKind::RightBracket)?;
+                    self.expect(TokKind::RightBracket)?;
 
-                Ok(Node::ListNode {
-                    elems: item_nodes,
-                    tok,
-                })
-            }()
-            .and_then(|node| -> Result<Node> {
-                self.pop_min_prec();
-                Ok(node)
-            })
-            .or_else(|err| -> Result<Node> {
-                self.pop_min_prec();
-                Err(err)
-            }),
+                    Ok(Node::ListNode {
+                        elems: item_nodes,
+                        tok,
+                    })
+                };
+                let temp_node = scope();
+                self.handle_pop_case(temp_node)
+            }
 
             TokKind::LeftBrace => {
-                || -> Result<Node> {
+                let scope = || -> Result<Node> {
                     self.push_min_prec(0);
                     // empty {} is always considerd an object -- an empty block is illegal
                     if self.peek().kind == TokKind::RightBrace {
@@ -315,18 +289,16 @@ impl Parser {
 
                     let first_expr = self.parse_node()?;
                     if self.is_eof() {
-                        return Err(AppErr {
-                            reason: ErrorReason::Syntax,
-                            message: "unexpected end of input inside block or object".to_string(),
-                            pos: tok.pos,
-                        });
+                        return Err(Error::Syntax(
+                            "unexpected end of input inside block or object".to_string(),
+                        ));
                     }
 
                     if self.peek().kind == TokKind::Colon {
-                        // it's am object
+                        // it's an object
                         self.next(); // eat the coln
                         let val_expr = self.parse_node()?;
-                        self.expect(TokKind::Comma)?;
+                        self.expect(TokKind::Padding)?;
                         let mut entries = vec![Node::ObjectEntry {
                             key: Box::new(first_expr),
                             val: Box::new(val_expr),
@@ -336,7 +308,7 @@ impl Parser {
                             let key = self.parse_node()?;
                             self.expect(TokKind::Colon)?;
                             let val = self.parse_node()?;
-                            self.expect(TokKind::Colon)?;
+                            self.expect(TokKind::Padding)?;
                             entries.push(Node::ObjectEntry {
                                 key: Box::new(key),
                                 val: Box::new(val),
@@ -348,7 +320,7 @@ impl Parser {
 
                     // it's a block
                     let mut exprs = vec![first_expr];
-                    self.expect(TokKind::Comma)?;
+                    self.expect(TokKind::Padding)?;
 
                     while !self.is_eof() && self.peek().kind != TokKind::RightBrace {
                         let expr = self.parse_node()?;
@@ -358,18 +330,12 @@ impl Parser {
 
                     self.expect(TokKind::RightBrace)?;
                     return Ok(Node::BlockNode { exprs, tok });
-                }()
-                .and_then(|node| -> Result<Node> {
-                    self.pop_min_prec();
-                    Ok(node)
-                })
-                .or_else(|err| -> Result<Node> {
-                    self.pop_min_prec();
-                    Err(err)
-                })
+                };
+                let temp_node = scope();
+                self.handle_pop_case(temp_node)
             }
             TokKind::FnKeyword => {
-                || -> Result<Node> {
+                let scope = || -> Result<Node> {
                     self.push_min_prec(0);
                     let mut name = String::new();
                     match &self.peek().kind {
@@ -402,7 +368,10 @@ impl Parser {
                                         break;
                                     }
 
-                                    args.push(rest_arg.clone());
+                                    args.push(new_arg.get_payload());
+                                    if self.peek().kind == TokKind::RightParan {
+                                        break;
+                                    }
                                     self.expect(TokKind::Comma)?;
                                 }
                                 Err(_) => {
@@ -439,15 +408,9 @@ impl Parser {
                         body: Box::new(body),
                         tok,
                     })
-                }()
-                .and_then(|node| -> Result<Node> {
-                    self.pop_min_prec();
-                    Ok(node)
-                })
-                .or_else(|err| -> Result<Node> {
-                    self.pop_min_prec();
-                    Err(err)
-                })
+                };
+                let temp_node = scope();
+                self.handle_pop_case(temp_node)
             }
             TokKind::Underscore => Ok(Node::EmptyNode { tok }),
             TokKind::Identifiers(payload) => Ok(Node::IdentifierNode {
@@ -463,7 +426,7 @@ impl Parser {
                 })
             }
             TokKind::IfKeyword => {
-                || -> Result<Node> {
+                let scope = || -> Result<Node> {
                     self.push_min_prec(0);
 
                     let cond_node: Node;
@@ -520,7 +483,7 @@ impl Parser {
                         }
                         self.expect(TokKind::BranchArrow)?;
                         let body = Rc::new(self.parse_node()?);
-                        self.expect(TokKind::Comma)?;
+                        self.expect(TokKind::Padding)?;
 
                         // We want to support multi-target branches, but don't want to
                         // incur the performance overhead in the interpreter/evaluator of
@@ -532,6 +495,7 @@ impl Parser {
                         // essentially considering it syntax sugar and splitting such
                         // branches into multiple AST branches, each with one target value.
                         for target in targets {
+                            //TODO: if target will always be a single value then we can remove this loop
                             branches.push(Node::IfBranch {
                                 target: Box::new(target),
                                 body: body.clone(),
@@ -544,44 +508,32 @@ impl Parser {
                         branches,
                         tok,
                     })
-                }()
-                .and_then(|node| -> Result<Node> {
-                    self.pop_min_prec();
-                    Ok(node)
-                })
-                .or_else(|err| -> Result<Node> {
-                    self.pop_min_prec();
-                    Err(err)
-                })
+                };
+                let temp_node = scope();
+                self.handle_pop_case(temp_node)
             }
-            TokKind::WithKeyword => || -> Result<Node> {
-                self.push_min_prec(0);
-                let mut with_expr_base = self.parse_node()?;
+            TokKind::WithKeyword => {
+                let mut scope = || -> Result<Node> {
+                    self.push_min_prec(0);
+                    let mut with_expr_base = self.parse_node()?;
 
-                match &mut with_expr_base {
-                    Node::FnCalNode { args, .. } => {
-                        let with_expr_last_arg = self.parse_node()?;
-                        args.push(with_expr_last_arg);
-                        Ok(with_expr_base)
+                    match &mut with_expr_base {
+                        Node::FnCalNode { args, .. } => {
+                            let with_expr_last_arg = self.parse_node()?;
+                            args.push(with_expr_last_arg);
+                            Ok(with_expr_base)
+                        }
+                        _ => Err(Error::Syntax(format!(
+                            "expected function call after with, got {}",
+                            with_expr_base
+                        ))),
                     }
-                    _ => Err(AppErr {
-                        reason: ErrorReason::Syntax,
-                        message: "with keyword should be followed by a function call, found %s"
-                            .to_string(),
-                        pos: tok.pos,
-                    }),
-                }
-            }()
-            .and_then(|node| -> Result<Node> {
-                self.pop_min_prec();
-                Ok(node)
-            })
-            .or_else(|err| -> Result<Node> {
-                self.pop_min_prec();
-                Err(err)
-            }),
+                };
+                let temp_node = scope();
+                self.handle_pop_case(temp_node)
+            }
             TokKind::LeftParan => {
-                || -> Result<Node> {
+                let scope = || -> Result<Node> {
                     self.push_min_prec(0);
                     let mut exprs = Vec::new();
 
@@ -596,26 +548,42 @@ impl Parser {
                     // unwrap the blockNode and just return the bare child
 
                     Ok(Node::BlockNode { exprs, tok })
-                }()
-                .and_then(|node| -> Result<Node> {
-                    self.pop_min_prec();
-                    Ok(node)
-                })
-                .or_else(|err| -> Result<Node> {
-                    self.pop_min_prec();
-                    Err(err)
-                })
+                };
+                let temp_node = scope();
+                self.handle_pop_case(temp_node)
             }
-            _ => Err(AppErr {
-                reason: ErrorReason::Syntax,
-                message: format_args!("unexpected token {tok} at start of unit").to_string(),
-                pos: tok.pos,
-            }),
+            _ => Err(Error::Syntax(
+                format_args!("unexpected token {tok} at start of unit").to_string(),
+            )),
         }
+    }
+}
+
+// concrete AstNode parse functions
+impl Parser {
+    fn parse_assignment(&mut self, left: Node) -> Result<Node> {
+        if self.peek().kind != TokKind::Assign && self.peek().kind != TokKind::NonlocalAssign {
+            return Ok(left);
+        }
+
+        let next = self.next().clone();
+        let mut node = Node::AssignmentNode {
+            is_local: next.kind == TokKind::Assign,
+            left: Box::new(left),
+            right: None,
+            tok: next,
+        };
+
+        match &mut node {
+            Node::AssignmentNode { right, .. } => *right = Some(Box::new(self.parse_node()?)),
+            _ => {}
+        }
+
+        Ok(node)
     }
 
     fn parse_sub_node(&mut self) -> Result<Node> {
-        || -> Result<Node> {
+        let mut scope = || -> Result<Node> {
             self.push_min_prec(0);
 
             let mut node = self.parse_unit()?;
@@ -647,7 +615,15 @@ impl Parser {
                             } else {
                                 args.push(arg)
                             }
-                            self.expect(TokKind::Comma)?;
+
+                            if self.peek().kind == TokKind::RightParan {
+                                break;
+                            } else if self.peek().kind == TokKind::Padding {
+                                self.expect(TokKind::Padding)?;
+                                continue;
+                            } else {
+                                self.expect(TokKind::Comma)?;
+                            }
                         }
                         self.expect(TokKind::RightParan)?;
 
@@ -663,21 +639,15 @@ impl Parser {
             }
 
             Ok(node)
-        }()
-        .and_then(|node| -> Result<Node> {
-            self.pop_min_prec();
-            Ok(node)
-        })
-        .or_else(|err| -> Result<Node> {
-            self.pop_min_prec();
-            Err(err)
-        })
+        };
+        let temp_node = scope();
+        self.handle_pop_case(temp_node)
     }
 
     fn parse_node(&mut self) -> Result<Node> {
         let mut node = self.parse_sub_node()?;
 
-        while !self.is_eof() && self.peek().kind != TokKind::Comma {
+        while !self.is_eof() && self.peek().kind != TokKind::Padding {
             match self.peek().kind {
                 // whatever follows an assignment expr cannot bind to the
                 // assignment expression itself by syntax rule, so we simply return
@@ -706,11 +676,7 @@ impl Parser {
 
                     loop {
                         if self.is_eof() {
-                            return Err(AppErr {
-                                reason: ErrorReason::Syntax,
-                                message: "Incomplete binary expression".to_string(),
-                                pos: self.peek().pos.clone(),
-                            });
+                            return Err(Error::Syntax("Incomplete binary expression".to_string()));
                         }
 
                         let peeked = self.peek().clone();
@@ -720,14 +686,10 @@ impl Parser {
                         }
                         self.next(); // eat the operator
                         if self.is_eof() {
-                            return Err(AppErr {
-                                reason: ErrorReason::Syntax,
-                                message: format!(
-                                    "Incomplete binary expression with {}",
-                                    peeked.kind
-                                ),
-                                pos: self.peek().pos.clone(),
-                            });
+                            return Err(Error::Syntax(format!(
+                                "Incomplete binary expression with {}",
+                                peeked.kind
+                            )));
                         }
                         self.push_min_prec(prec);
                         let right = self.parse_node()?;
@@ -752,14 +714,10 @@ impl Parser {
                             node = pipe_right;
                         }
                         _ => {
-                            return Err(AppErr {
-                                reason: ErrorReason::Syntax,
-                                message: format!(
-                                    "Expected function call after |>, got {}",
-                                    pipe_right
-                                ),
-                                pos,
-                            })
+                            return Err(Error::Syntax(format!(
+                                "Expected function call after |>, got {}",
+                                pipe_right
+                            )))
                         }
                     }
                 }
@@ -775,10 +733,157 @@ impl Parser {
 
         while !self.is_eof() {
             let node = self.parse_node()?;
-            self.expect(TokKind::Comma)?;
+            println!("node: {:?}", node);
+            self.expect(TokKind::Padding)?;
             nodes.push(node);
         }
 
         Ok(nodes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        lexer::token::{Pos, TokKind, Token},
+        parser,
+    };
+
+    #[test]
+    fn test_parser() {
+        let _expected_output: Vec<()> = vec![];
+
+        let tokens = vec![
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("import".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("std".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::Identifiers("fmt".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("import".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("fmt".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::Identifiers("http".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("import".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("http".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::Identifiers("server".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("http".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("Server".to_string()),
+            TokKind::LeftParan,
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::WithKeyword,
+            TokKind::Identifiers("server".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("route".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("/hello/:name".to_string()),
+            TokKind::RightParan,
+            TokKind::FnKeyword,
+            TokKind::LeftParan,
+            TokKind::Identifiers("params".to_string()),
+            TokKind::RightParan,
+            TokKind::LeftBrace,
+            TokKind::FnKeyword,
+            TokKind::LeftParan,
+            TokKind::Identifiers("req".to_string()),
+            TokKind::Comma,
+            TokKind::Identifiers("end".to_string()),
+            TokKind::RightParan,
+            TokKind::IfKeyword,
+            TokKind::Identifiers("req".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("method".to_string()),
+            TokKind::LeftBrace,
+            TokKind::StringLiteral("GET".to_string()),
+            TokKind::BranchArrow,
+            TokKind::Identifiers("end".to_string()),
+            TokKind::LeftParan,
+            TokKind::LeftBrace,
+            TokKind::Identifiers("status".to_string()),
+            TokKind::Colon,
+            TokKind::NumberLiteral("200".to_string()),
+            TokKind::Padding,
+            TokKind::Identifiers("body".to_string()),
+            TokKind::Colon,
+            TokKind::Identifiers("fmt".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("format".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("Hello, {{ 0 }}!".to_string()),
+            TokKind::Padding,
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("default".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("params".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("name".to_string()),
+            TokKind::Comma,
+            TokKind::StringLiteral("World".to_string()),
+            TokKind::RightParan,
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::RightBrace,
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::Underscore,
+            TokKind::BranchArrow,
+            TokKind::Identifiers("end".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("http".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("MethodNotAllowed".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::RightBrace,
+            TokKind::Padding,
+            TokKind::RightBrace,
+            TokKind::Padding,
+            TokKind::Identifiers("PORT".to_string()),
+            TokKind::Assign,
+            TokKind::NumberLiteral("9999".to_string()),
+            TokKind::Padding,
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("println".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("server listing on port:".to_string()),
+            TokKind::Comma,
+            TokKind::Identifiers("PORT".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::Identifiers("server".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("start".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("PORT".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+        ];
+
+        let input = tokens
+            .iter()
+            .map(|t| Token {
+                kind: t.clone(),
+                pos: Pos(0, 0),
+            })
+            .collect();
+
+        let parser = parser::parser::Parser::new(input);
+        let nodes = parser.parse().unwrap();
+        println!("{:?}", nodes);
+        assert_eq!(nodes.len(), 8);
     }
 }

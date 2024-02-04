@@ -2,6 +2,8 @@ use super::token::{lookup_ident, Pos, TokKind, Token};
 use crate::error::error::{Error, Result};
 use crate::utils::utils::log_debug;
 use std::io::{BufRead, BufReader};
+use std::iter::{Enumerate, Peekable};
+use std::str::Chars;
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -27,7 +29,10 @@ fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>
     // read a complete line
     let mut line = 1;
     'out: for _line in unbuffered.lines() {
-        let buf = _line.map_err(|e| Error::System(e.to_string()))?;
+        let buf = _line
+            .map_err(|e| Error::System(e.to_string()))?
+            .trim()
+            .to_string();
         // shebang-style ignored line, keep taking until EOL
         if buf.starts_with("#!") || buf.is_empty() {
             line += 1;
@@ -36,112 +41,134 @@ fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>
 
         let mut buf_iter = buf.chars().into_iter().enumerate().peekable();
         while let Some((col, ch)) = buf_iter.next() {
-            let commit_token = |tok: TokKind, tokens| {
-                commit(
-                    Token {
-                        kind: tok,
-                        pos: Pos(line, col + 1),
-                    },
-                    tokens,
-                    debug,
-                )
-            };
+            let mut commit_token =
+                |tok: TokKind, buf_iter: &mut Peekable<Enumerate<Chars>>, pos: bool| {
+                    let temp_tok = tok.clone();
+                    commit(
+                        Token {
+                            kind: tok,
+                            pos: if pos {
+                                Pos(line, col)
+                            } else {
+                                Pos(line, col + 1)
+                            },
+                        },
+                        &mut tokens,
+                        debug,
+                    );
+
+                    // reach end of line
+                    if buf_iter.peek().is_none() {
+                        // check if ch allows padding
+                        if TokKind::allow_padding(&temp_tok) {
+                            commit(
+                                Token {
+                                    kind: TokKind::Padding,
+                                    pos: Pos(line, col + 1),
+                                },
+                                &mut tokens,
+                                debug,
+                            );
+                        }
+                    }
+                };
 
             match ch {
                 '\t' | '\r' | ' ' => {}
-                ',' => commit_token(TokKind::Comma, &mut tokens),
+                ',' => commit_token(TokKind::Comma, &mut buf_iter, false),
                 '.' => {
                     if let Some((_, '.')) = buf_iter.peek() {
                         buf_iter.next();
                         if let Some((_, '.')) = buf_iter.peek() {
                             buf_iter.next();
-                            commit_token(TokKind::Elispe, &mut tokens);
+                            commit_token(TokKind::Elispe, &mut buf_iter, false);
                         }
                     } else {
-                        commit_token(TokKind::Dot, &mut tokens);
+                        commit_token(TokKind::Dot, &mut buf_iter, false);
                     }
                 }
-                '_' => commit_token(TokKind::Underscore, &mut tokens),
-                '(' => commit_token(TokKind::LeftParan, &mut tokens),
-                ')' => commit_token(TokKind::RightParan, &mut tokens),
-                '[' => commit_token(TokKind::LeftBracket, &mut tokens),
-                ']' => commit_token(TokKind::RightBracket, &mut tokens),
-                '{' => commit_token(TokKind::LeftBrace, &mut tokens),
-                '}' => commit_token(TokKind::RightBrace, &mut tokens),
+                '_' => commit_token(TokKind::Underscore, &mut buf_iter, false),
+                '(' => commit_token(TokKind::LeftParan, &mut buf_iter, false),
+                ')' => commit_token(TokKind::RightParan, &mut buf_iter, false),
+                '[' => commit_token(TokKind::LeftBracket, &mut buf_iter, false),
+                ']' => commit_token(TokKind::RightBracket, &mut buf_iter, false),
+                '{' => commit_token(TokKind::LeftBrace, &mut buf_iter, false),
+                '}' => commit_token(TokKind::RightBrace, &mut buf_iter, false),
                 ':' => {
                     if let Some((_, '=')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::Assign, &mut tokens);
+                        commit_token(TokKind::Assign, &mut buf_iter, false);
                     } else {
-                        commit_token(TokKind::Colon, &mut tokens);
+                        commit_token(TokKind::Colon, &mut buf_iter, false);
                     }
                 }
                 '<' => {
                     if let Some((_, '<')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::PushArrow, &mut tokens);
+                        commit_token(TokKind::PushArrow, &mut buf_iter, false);
                     } else if let Some((_, '-')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::NonlocalAssign, &mut tokens);
+                        commit_token(TokKind::NonlocalAssign, &mut buf_iter, false);
                     } else if let Some((_, '=')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::Leq, &mut tokens);
+                        commit_token(TokKind::Leq, &mut buf_iter, false);
                     } else {
-                        commit_token(TokKind::Less, &mut tokens);
+                        commit_token(TokKind::Less, &mut buf_iter, false);
                     }
                 }
-                '?' => commit_token(TokKind::Qmark, &mut tokens),
+                '?' => commit_token(TokKind::Qmark, &mut buf_iter, false),
                 '!' => {
                     if let Some((_, '=')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::Neq, &mut tokens);
+                        commit_token(TokKind::Neq, &mut buf_iter, false);
                     } else {
-                        commit_token(TokKind::Exclam, &mut tokens);
+                        commit_token(TokKind::Exclam, &mut buf_iter, false);
                     }
                 }
-                '+' => commit_token(TokKind::Plus, &mut tokens),
+                '+' => commit_token(TokKind::Plus, &mut buf_iter, false),
                 '-' => {
                     if let Some((_, '>')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::BranchArrow, &mut tokens);
+                        commit_token(TokKind::BranchArrow, &mut buf_iter, false);
                     } else {
-                        commit_token(TokKind::Minus, &mut tokens);
+                        commit_token(TokKind::Minus, &mut buf_iter, false);
                     }
                 }
                 '/' => {
                     if let Some((_, '/')) = buf_iter.peek() {
                         buf_iter.next();
                         let comment_string = buf_iter
+                            .clone()
                             .map(|(_, ch)| ch)
                             .collect::<String>()
                             .trim()
                             .to_string();
-                        commit_token(TokKind::Comment(comment_string), &mut tokens);
+                        commit_token(TokKind::Comment(comment_string), &mut buf_iter, false);
                         continue 'out;
                     } else {
-                        commit_token(TokKind::Divide, &mut tokens);
+                        commit_token(TokKind::Divide, &mut buf_iter, false);
                     }
                 }
-                '%' => commit_token(TokKind::Modulus, &mut tokens),
-                '^' => commit_token(TokKind::Xor, &mut tokens),
-                '&' => commit_token(TokKind::And, &mut tokens),
+                '%' => commit_token(TokKind::Modulus, &mut buf_iter, false),
+                '^' => commit_token(TokKind::Xor, &mut buf_iter, false),
+                '&' => commit_token(TokKind::And, &mut buf_iter, false),
                 '|' => {
                     if let Some((_, '>')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::PipeArrow, &mut tokens);
+                        commit_token(TokKind::PipeArrow, &mut buf_iter, false);
                     } else {
-                        commit_token(TokKind::Or, &mut tokens);
+                        commit_token(TokKind::Or, &mut buf_iter, false);
                     }
                 }
                 '>' => {
                     if let Some((_, '=')) = buf_iter.peek() {
                         buf_iter.next();
-                        commit_token(TokKind::Geq, &mut tokens);
+                        commit_token(TokKind::Geq, &mut buf_iter, false);
                     } else {
-                        commit_token(TokKind::Greater, &mut tokens);
+                        commit_token(TokKind::Greater, &mut buf_iter, false);
                     }
                 }
-                '=' => commit_token(TokKind::Eq, &mut tokens),
+                '=' => commit_token(TokKind::Eq, &mut buf_iter, false),
                 '\'' => {
                     let mut accumulator = String::new();
                     while let Some((_, ch)) = buf_iter.next() {
@@ -150,7 +177,7 @@ fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>
                         }
                         accumulator.push(ch);
                     }
-                    commit_token(TokKind::StringLiteral(accumulator), &mut tokens);
+                    commit_token(TokKind::StringLiteral(accumulator), &mut buf_iter, false);
                 }
                 _ => {
                     let mut entry = String::from(ch);
@@ -179,24 +206,14 @@ fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>
                     // Determine the token type based on the final 'entry' string
                     if NUMBER_REGEX.is_match(&entry) {
                         // Handle numeric token
-                        commit(
-                            Token {
-                                kind: TokKind::NumberLiteral(entry.replace("_", "")),
-                                pos: Pos(line, col),
-                            },
-                            &mut tokens,
-                            debug,
+                        commit_token(
+                            TokKind::NumberLiteral(entry.replace("_", "")),
+                            &mut buf_iter,
+                            true,
                         );
                     } else if IDENTIFIER_REGEX.is_match(&entry) {
                         // Handle Identifiers token
-                        commit(
-                            Token {
-                                kind: lookup_ident(&entry),
-                                pos: Pos(line, col),
-                            },
-                            &mut tokens,
-                            debug,
-                        )
+                        commit_token(lookup_ident(&entry), &mut buf_iter, false);
                     }
                 }
             }
@@ -221,6 +238,8 @@ mod tests {
     #[test]
     fn test_tokenize() {
         let source_string: &[u8] = b"
+        #! Shebang line to be ignored
+
         std := import('std')
         fmt := import('fmt')
         http := import('http')
@@ -256,18 +275,21 @@ mod tests {
             TokKind::LeftParan,
             TokKind::StringLiteral("std".to_string()),
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::Identifiers("fmt".to_string()),
             TokKind::Assign,
             TokKind::Identifiers("import".to_string()),
             TokKind::LeftParan,
             TokKind::StringLiteral("fmt".to_string()),
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::Identifiers("http".to_string()),
             TokKind::Assign,
             TokKind::Identifiers("import".to_string()),
             TokKind::LeftParan,
             TokKind::StringLiteral("http".to_string()),
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::Identifiers("server".to_string()),
             TokKind::Assign,
             TokKind::Identifiers("http".to_string()),
@@ -275,6 +297,7 @@ mod tests {
             TokKind::Identifiers("Server".to_string()),
             TokKind::LeftParan,
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::WithKeyword,
             TokKind::Identifiers("server".to_string()),
             TokKind::Dot,
@@ -306,6 +329,7 @@ mod tests {
             TokKind::Identifiers("status".to_string()),
             TokKind::Colon,
             TokKind::NumberLiteral("200".to_string()),
+            TokKind::Padding,
             TokKind::Identifiers("body".to_string()),
             TokKind::Colon,
             TokKind::Identifiers("fmt".to_string()),
@@ -313,6 +337,7 @@ mod tests {
             TokKind::Identifiers("format".to_string()),
             TokKind::LeftParan,
             TokKind::StringLiteral("Hello, {{ 0 }}!".to_string()),
+            TokKind::Padding,
             TokKind::Identifiers("std".to_string()),
             TokKind::Dot,
             TokKind::Identifiers("default".to_string()),
@@ -324,8 +349,10 @@ mod tests {
             TokKind::StringLiteral("World".to_string()),
             TokKind::RightParan,
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::RightBrace,
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::Underscore,
             TokKind::BranchArrow,
             TokKind::Identifiers("end".to_string()),
@@ -334,11 +361,15 @@ mod tests {
             TokKind::Dot,
             TokKind::Identifiers("MethodNotAllowed".to_string()),
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::RightBrace,
+            TokKind::Padding,
             TokKind::RightBrace,
+            TokKind::Padding,
             TokKind::Identifiers("PORT".to_string()),
             TokKind::Assign,
             TokKind::NumberLiteral("9999".to_string()),
+            TokKind::Padding,
             TokKind::Identifiers("std".to_string()),
             TokKind::Dot,
             TokKind::Identifiers("println".to_string()),
@@ -347,14 +378,15 @@ mod tests {
             TokKind::Comma,
             TokKind::Identifiers("PORT".to_string()),
             TokKind::RightParan,
+            TokKind::Padding,
             TokKind::Identifiers("server".to_string()),
             TokKind::Dot,
             TokKind::Identifiers("start".to_string()),
             TokKind::LeftParan,
             TokKind::Identifiers("PORT".to_string()),
             TokKind::RightParan,
+            TokKind::Padding,
         ];
-
         assert_eq!(output, expected_output);
     }
 }

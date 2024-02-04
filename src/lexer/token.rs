@@ -15,6 +15,12 @@ pub struct Token {
     pub pos: Pos,
 }
 
+impl Token {
+    pub fn get_payload(&self) -> String {
+        self.kind.get_payload()
+    }
+}
+
 impl Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)
@@ -70,6 +76,54 @@ pub enum TokKind {
     FalseLiteral,
     StringLiteral(String),
     NumberLiteral(String),
+    // special
+    Padding,
+}
+
+impl TokKind {
+    fn get_payload(&self) -> String {
+        match self {
+            TokKind::Comment(payload) => payload.to_string(),
+            TokKind::Identifiers(payload) => payload.to_string(),
+            TokKind::StringLiteral(payload) => payload.to_string(),
+            TokKind::NumberLiteral(payload) => payload.to_string(),
+            _ => "".to_string(),
+        }
+    }
+
+    pub fn allow_padding(tok_kind: &TokKind) -> bool {
+        match tok_kind {
+            TokKind::Comma
+            | TokKind::LeftParan
+            | TokKind::LeftBracket
+            | TokKind::LeftBrace
+            | TokKind::Plus
+            | TokKind::Minus
+            | TokKind::Times
+            | TokKind::Divide
+            | TokKind::Modulus
+            | TokKind::Xor
+            | TokKind::And
+            | TokKind::Or
+            | TokKind::Exclam
+            | TokKind::Greater
+            | TokKind::Less
+            | TokKind::Eq
+            | TokKind::Geq
+            | TokKind::Leq
+            | TokKind::Assign
+            | TokKind::NonlocalAssign
+            | TokKind::Dot
+            | TokKind::Colon
+            | TokKind::FnKeyword
+            | TokKind::IfKeyword
+            | TokKind::WithKeyword
+            | TokKind::PipeArrow
+            | TokKind::BranchArrow
+            | TokKind::PushArrow => false,
+            _ => true,
+        }
+    }
 }
 
 pub fn lookup_ident(ident: &str) -> TokKind {
@@ -127,6 +181,7 @@ impl fmt::Display for TokKind {
             TokKind::FalseLiteral => write!(f, "false"),
             TokKind::StringLiteral(payload) => write!(f, r#"string("{payload}")"#),
             TokKind::NumberLiteral(payload) => write!(f, "number({payload})",),
+            TokKind::Padding => write!(f, "padding"),
             _ => write!(f, "(unknown token)"),
         }
     }
