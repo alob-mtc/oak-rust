@@ -1,0 +1,19 @@
+std := import('std')
+fmt := import('fmt')
+http := import('http')
+
+server := http.Server()
+with server.route('/hello/:name') fn(params) {
+    fn(req, end) if req.method {
+        'GET' -> end({
+            status: 200
+            body: fmt.format('Hello, {{ 0 }}!'
+                std.default(params.name, 'World'))
+        })
+        _ -> end(http.MethodNotAllowed)
+    }
+}
+
+PORT := 9999
+std.println('server listing on port:', PORT)
+server.start(PORT)
