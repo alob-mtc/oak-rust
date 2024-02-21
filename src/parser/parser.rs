@@ -1,122 +1,26 @@
+use std::iter::Peekable;
 use std::rc::Rc;
+use std::vec::IntoIter;
 
 use crate::parser::ast::Node;
+use crate::parser::utils::Utils;
 use crate::{
     error::error::{Error, Result},
-    lexer::token::{Pos, TokKind, Token},
+    lexer::token::{TokKind, Token},
 };
 
-pub struct Parser {
-    tokens: Vec<Token>,
-    nodes: Vec<Node>,
-    index: i32,
+struct Precedence {
     min_binary_prec: Vec<i32>,
 }
 
-impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+impl Precedence {
+    pub fn new() -> Self {
         Self {
-            tokens,
-            nodes: Vec::new(),
-            index: 0,
-            min_binary_prec: Vec::new(),
-        }
-    }
-}
-
-// utils
-impl Parser {
-    fn last_min_prec(&self) -> i32 {
-        self.min_binary_prec[self.min_binary_prec.len() - 1]
-    }
-
-    fn push_min_prec(&mut self, prec: i32) {
-        self.min_binary_prec.push(prec)
-    }
-
-    pub fn pop_min_prec(&mut self) {
-        self.min_binary_prec.pop().unwrap();
-    }
-
-    fn is_eof(&self) -> bool {
-        self.index == self.tokens.len() as i32
-    }
-
-    fn peek(&self) -> &Token {
-        self.tokens.get(self.index as usize).unwrap()
-    }
-
-    fn peek_ahead(&self, n: i32) -> Option<&Token> {
-        let index = (self.index + n) as usize;
-        if index > self.tokens.len() {
-            // use comma as "nothing is here" value
-            return None;
-        };
-
-        self.tokens.get(index)
-    }
-
-    fn next(&mut self) -> &Token {
-        let index = self.index as usize;
-        if index < self.tokens.len() {
-            self.index += 1;
-        }
-
-        self.tokens.get(index).unwrap()
-    }
-
-    fn back(&mut self) {
-        if self.index > 0 {
-            self.index -= 1
+            min_binary_prec: vec![0],
         }
     }
 
-    fn handle_pop_case(&mut self, node: Result<Node>) -> Result<Node> {
-        node.and_then(|node| -> Result<Node> {
-            self.pop_min_prec();
-            Ok(node)
-        })
-        .or_else(|err| -> Result<Node> {
-            self.pop_min_prec();
-            Err(err)
-        })
-    }
-
-    fn expect(&mut self, kind: TokKind) -> Result<&Token> {
-        if self.is_eof() {
-            return Err(Error::Syntax(format!(
-                "unexpted end of input, expected {kind}"
-            )));
-        }
-
-        let next = self.next();
-
-        let valid = match &kind {
-            TokKind::Comment(_) => matches!(&next.kind, TokKind::Comment(_)),
-            TokKind::Identifiers(_) => matches!(&next.kind, TokKind::Identifiers(_)),
-            TokKind::StringLiteral(_) => matches!(&next.kind, TokKind::StringLiteral(_)),
-            TokKind::NumberLiteral(_) => matches!(&next.kind, TokKind::NumberLiteral(_)),
-            _ => next.kind == kind,
-        };
-
-        if !valid {
-            return Err(Error::Syntax(format!(
-                "unexpted token {next}, expected {kind}"
-            )));
-        }
-
-        Ok(next)
-    }
-
-    fn read_until_token_kind(&mut self, kind: TokKind) -> Vec<Token> {
-        let mut tokens = Vec::new();
-        while !self.is_eof() && self.peek().kind != kind {
-            tokens.push(self.next().clone());
-        }
-        tokens
-    }
-
-    fn infix_op_precedence(op: &TokKind) -> i32 {
+    pub fn infix_op_precedence(op: &TokKind) -> i32 {
         match op {
             TokKind::Plus | TokKind::Minus => 40,
             TokKind::Times | TokKind::Divide => 50,
@@ -134,620 +38,705 @@ impl Parser {
             _ => -1,
         }
     }
+
+    fn last_min_prec(&self) -> i32 {
+        self.min_binary_prec[self.min_binary_prec.len() - 1]
+    }
+
+    fn push_min_prec(&mut self, prec: i32) {
+        self.min_binary_prec.push(prec)
+    }
+
+    fn pop_min_prec(&mut self) {
+        self.min_binary_prec.pop().unwrap();
+    }
+
+    fn handle_pop_case(&mut self, node: Result<Node>) -> Result<Node> {
+        node.and_then(|node| -> Result<Node> {
+            self.pop_min_prec();
+            Ok(node)
+        })
+        .or_else(|err| -> Result<Node> {
+            self.pop_min_prec();
+            Err(err)
+        })
+    }
 }
 
-impl Parser {
-    // parseUnit is responsible for parsing the smallest complete syntactic "units"
-    // of Oak's syntax, like literals including function literals, grouped
-    // expressions in blocks, and if/with expressions.
-    fn parse_unit(&mut self) -> Result<Node> {
-        let tok = self.next().clone();
-        match &tok.kind {
-            TokKind::Qmark => Ok(Node::NullNode { tok }),
-            TokKind::StringLiteral(payload) => {
-                let mut payload_builder = Vec::new();
-                let mut chars = payload.chars().peekable();
+// parseUnit is responsible for parsing the smallest complete syntactic "units"
+// of Oak's syntax, like literals including function literals, grouped
+// expressions in blocks, and if/with expressions.
+fn parse_unit(tokens: &mut Peekable<IntoIter<Token>>, pre_ctr: &mut Precedence) -> Result<Node> {
+    let tok = tokens.next().unwrap();
+    match &tok.kind {
+        TokKind::Comment(_) => {
+            // comments are not part of the AST
+            Ok(Node::EmptyNode { tok })
+        }
+        TokKind::Qmark => Ok(Node::NullNode { tok }),
+        TokKind::StringLiteral(payload) => {
+            let mut payload_builder = Vec::new();
+            let mut chars = payload.chars().peekable();
 
-                while let Some(c) = chars.peek() {
-                    match c {
-                        '\\' => {
-                            chars.next(); // consume the backslash
+            while let Some(c) = chars.peek() {
+                match c {
+                    '\\' => {
+                        chars.next(); // consume the backslash
 
-                            match chars.next() {
-                                Some('t') => payload_builder.push(b'\t'),
-                                Some('n') => payload_builder.push(b'\n'),
-                                Some('r') => payload_builder.push(b'\r'),
-                                Some('f') => payload_builder.push(0x0C),
-                                Some('x') => {
-                                    let hex_code = chars
-                                        .next()
-                                        .and_then(|high| chars.next().map(|low| (high, low)))
-                                        .and_then(|(high, low)| {
-                                            u8::from_str_radix(&format!("{high}{low}"), 16).ok()
-                                        });
+                        match chars.next() {
+                            Some('t') => payload_builder.push(b'\t'),
+                            Some('n') => payload_builder.push(b'\n'),
+                            Some('r') => payload_builder.push(b'\r'),
+                            Some('f') => payload_builder.push(0x0C),
+                            Some('x') => {
+                                let hex_code = chars
+                                    .next()
+                                    .and_then(|high| chars.next().map(|low| (high, low)))
+                                    .and_then(|(high, low)| {
+                                        u8::from_str_radix(&format!("{high}{low}"), 16).ok()
+                                    });
 
-                                    match hex_code {
-                                        Some(code) => payload_builder.push(code),
-                                        None => payload_builder.push(b'x'),
-                                    }
+                                match hex_code {
+                                    Some(code) => payload_builder.push(code),
+                                    None => payload_builder.push(b'x'),
                                 }
-                                Some(c) => payload_builder.extend(c.to_string().as_bytes()),
-                                _ => break,
                             }
-                        }
-                        _ => {
-                            payload_builder.extend(c.to_string().as_bytes());
-                            chars.next();
+                            Some(c) => payload_builder.extend(c.to_string().as_bytes()),
+                            _ => break,
                         }
                     }
+                    _ => {
+                        payload_builder.extend(c.to_string().as_bytes());
+                        chars.next();
+                    }
                 }
-
-                Ok(Node::StringNode {
-                    payload: payload_builder,
-                    tok,
-                })
             }
 
-            TokKind::NumberLiteral(payload) => {
-                if payload.contains(".") {
-                    return match payload.parse::<f64>() {
-                        Ok(f) => Ok(Node::FloatNode { payload: f, tok }),
-                        Err(err) => Err(Error::System(err.to_string())),
-                    };
-                }
+            Ok(Node::StringNode {
+                payload: payload_builder,
+                tok,
+            })
+        }
 
-                match payload.parse::<i64>() {
-                    Ok(i) => return Ok(Node::IntNode { payload: i, tok }),
+        TokKind::NumberLiteral(payload) => {
+            if payload.contains(".") {
+                return match payload.parse::<f64>() {
+                    Ok(f) => Ok(Node::FloatNode { payload: f, tok }),
                     Err(err) => Err(Error::System(err.to_string())),
-                }
+                };
             }
-            TokKind::TrueLiteral => Ok(Node::BoolNode { payload: true, tok }),
-            TokKind::FalseLiteral => Ok(Node::BoolNode {
-                payload: false,
+
+            match payload.parse::<i64>() {
+                Ok(i) => return Ok(Node::IntNode { payload: i, tok }),
+                Err(err) => Err(Error::System(err.to_string())),
+            }
+        }
+        TokKind::TrueLiteral => Ok(Node::BoolNode { payload: true, tok }),
+        TokKind::FalseLiteral => Ok(Node::BoolNode {
+            payload: false,
+            tok,
+        }),
+        TokKind::Colon => match &tokens.peek().unwrap().kind {
+            TokKind::Identifiers(_) => Ok(Node::AtomNode {
+                payload: tokens.next().unwrap().kind.to_string(),
                 tok,
             }),
-            TokKind::Colon => match &self.peek().kind {
-                TokKind::Identifiers(_) => {
-                    return Ok(Node::AtomNode {
-                        payload: self.next().kind.to_string(),
-                        tok,
-                    })
-                }
-                TokKind::IfKeyword => {
-                    self.next();
-                    return Ok(Node::AtomNode {
-                        payload: "if".to_string(),
-                        tok,
-                    });
-                }
-                TokKind::FnKeyword => {
-                    self.next();
-                    return Ok(Node::AtomNode {
-                        payload: "fn".to_string(),
-                        tok,
-                    });
-                }
-                TokKind::WithKeyword => {
-                    self.next();
-                    return Ok(Node::AtomNode {
-                        payload: "with".to_string(),
-                        tok,
-                    });
-                }
-                TokKind::TrueLiteral => {
-                    self.next();
-                    return Ok(Node::AtomNode {
-                        payload: "true".to_string(),
-                        tok,
-                    });
-                }
-                TokKind::FalseLiteral => {
-                    self.next();
-                    return Ok(Node::AtomNode {
-                        payload: "false".to_string(),
-                        tok,
-                    });
-                }
-                _ => Err(Error::Syntax(format!(
-                    "expected identifier after ':', got {}",
-                    self.peek()
-                ))),
-            },
-            TokKind::LeftBracket => {
-                let scope = || -> Result<Node> {
-                    self.push_min_prec(0);
-
-                    let mut item_nodes = Vec::new();
-                    while !self.is_eof() && self.peek().kind != TokKind::RightBracket {
-                        let node = self.parse_node()?;
-                        self.expect(TokKind::Comma)?;
-                        item_nodes.push(node);
-                    }
-
-                    self.expect(TokKind::RightBracket)?;
-
-                    Ok(Node::ListNode {
-                        elems: item_nodes,
-                        tok,
-                    })
-                };
-                let temp_node = scope();
-                self.handle_pop_case(temp_node)
-            }
-
-            TokKind::LeftBrace => {
-                let scope = || -> Result<Node> {
-                    self.push_min_prec(0);
-                    // empty {} is always considerd an object -- an empty block is illegal
-                    if self.peek().kind == TokKind::RightBrace {
-                        self.next(); // eat the right brace
-                        return Ok(Node::ObjectNode {
-                            entries: Vec::new(),
-                            tok,
-                        });
-                    }
-
-                    let first_expr = self.parse_node()?;
-                    if self.is_eof() {
-                        return Err(Error::Syntax(
-                            "unexpected end of input inside block or object".to_string(),
-                        ));
-                    }
-
-                    if self.peek().kind == TokKind::Colon {
-                        // it's an object
-                        self.next(); // eat the coln
-                        let val_expr = self.parse_node()?;
-                        self.expect(TokKind::Padding)?;
-                        let mut entries = vec![Node::ObjectEntry {
-                            key: Box::new(first_expr),
-                            val: Box::new(val_expr),
-                        }];
-
-                        while !self.is_eof() && self.peek().kind != TokKind::RightBrace {
-                            let key = self.parse_node()?;
-                            self.expect(TokKind::Colon)?;
-                            let val = self.parse_node()?;
-                            self.expect(TokKind::Padding)?;
-                            entries.push(Node::ObjectEntry {
-                                key: Box::new(key),
-                                val: Box::new(val),
-                            });
-                        }
-                        self.expect(TokKind::RightBrace)?;
-                        return Ok(Node::ObjectNode { entries, tok });
-                    }
-
-                    // it's a block
-                    let mut exprs = vec![first_expr];
-                    self.expect(TokKind::Padding)?;
-
-                    while !self.is_eof() && self.peek().kind != TokKind::RightBrace {
-                        let expr = self.parse_node()?;
-                        self.expect(TokKind::Comma)?;
-                        exprs.push(expr)
-                    }
-
-                    self.expect(TokKind::RightBrace)?;
-                    return Ok(Node::BlockNode { exprs, tok });
-                };
-                let temp_node = scope();
-                self.handle_pop_case(temp_node)
+            TokKind::IfKeyword => {
+                tokens.next();
+                Ok(Node::AtomNode {
+                    payload: "if".to_string(),
+                    tok,
+                })
             }
             TokKind::FnKeyword => {
-                let scope = || -> Result<Node> {
-                    self.push_min_prec(0);
-                    let mut name = String::new();
-                    match &self.peek().kind {
-                        TokKind::Identifiers(payload) => {
-                            // optional name fn
-                            name = payload.clone();
-                            self.next();
-                        }
-                        _ => {}
-                    }
-
-                    let mut args = Vec::new();
-                    let mut rest_arg = String::new();
-                    if self.peek().kind == TokKind::LeftParan {
-                        // optional argument list
-                        self.next(); // eat the leftParen
-                        while !self.is_eof() && self.peek().kind != TokKind::RightParan {
-                            match self.expect(TokKind::Identifiers("".to_string())) {
-                                Ok(arg) => {
-                                    let new_arg = arg.clone();
-                                    // maybe this is a rest arg
-                                    if self.peek().kind == TokKind::Elispe {
-                                        match new_arg.kind {
-                                            TokKind::Identifiers(payload) => {
-                                                rest_arg = payload.clone();
-                                            }
-                                            _ => {}
-                                        }
-                                        self.expect(TokKind::Comma)?;
-                                        break;
-                                    }
-
-                                    args.push(new_arg.get_payload());
-                                    if self.peek().kind == TokKind::RightParan {
-                                        break;
-                                    }
-                                    self.expect(TokKind::Comma)?;
-                                }
-                                Err(_) => {
-                                    self.back(); // try again
-                                    self.expect(TokKind::Underscore)?;
-
-                                    args.push("".to_string());
-                                    self.expect(TokKind::Comma)?;
-                                    continue;
-                                }
-                            }
-                        }
-                        self.expect(TokKind::RightParan)?;
-                    }
-
-                    let mut body = self.parse_node()?;
-
-                    // Exception to the "{} is empty object" rule is that `fn {}` parses as
-                    // a function with an empty block as a bod
-                    body = match body {
-                        Node::ObjectNode { entries, tok, .. } if entries.is_empty() => {
-                            Node::BlockNode {
-                                exprs: Vec::new(),
-                                tok,
-                            }
-                        }
-                        _ => body,
-                    };
-
-                    Ok(Node::FnNode {
-                        name,
-                        args,
-                        rest_arg,
-                        body: Box::new(body),
-                        tok,
-                    })
-                };
-                let temp_node = scope();
-                self.handle_pop_case(temp_node)
-            }
-            TokKind::Underscore => Ok(Node::EmptyNode { tok }),
-            TokKind::Identifiers(payload) => Ok(Node::IdentifierNode {
-                payload: payload.clone(),
-                tok,
-            }),
-            TokKind::Minus | TokKind::Exclam => {
-                let right = self.parse_sub_node()?;
-
-                Ok(Node::UnaryNode {
-                    right: Box::new(right),
+                tokens.next();
+                Ok(Node::AtomNode {
+                    payload: "fn".to_string(),
                     tok,
                 })
             }
-            TokKind::IfKeyword => {
-                let scope = || -> Result<Node> {
-                    self.push_min_prec(0);
+            TokKind::WithKeyword => {
+                tokens.next();
+                Ok(Node::AtomNode {
+                    payload: "with".to_string(),
+                    tok,
+                })
+            }
+            TokKind::TrueLiteral => {
+                tokens.next();
+                Ok(Node::AtomNode {
+                    payload: "true".to_string(),
+                    tok,
+                })
+            }
+            TokKind::FalseLiteral => {
+                tokens.next();
+                Ok(Node::AtomNode {
+                    payload: "false".to_string(),
+                    tok,
+                })
+            }
+            _ => Err(Error::Syntax(format!(
+                "expected identifier after ':', got {}",
+                tokens.peek().unwrap()
+            ))),
+        },
+        TokKind::LeftBracket => {
+            let scope = || -> Result<Node> {
+                pre_ctr.push_min_prec(0);
 
-                    let cond_node: Node;
-                    let mut branches = Vec::new();
-
-                    // if no explicit condition is provided (i.e. if the keyword is
-                    // followed by a { ... }), we assume the condition is "true" to allow
-                    // for the useful `if { case, case ... }` pattern.
-
-                    if self.peek().kind == TokKind::LeftBrace {
-                        cond_node = Node::BoolNode {
-                            payload: true,
-                            tok: tok.clone(),
-                        }
-                    } else {
-                        cond_node = self.parse_node()?;
+                let mut item_nodes = Vec::new();
+                while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::RightBracket {
+                    let node = parse_node(tokens, pre_ctr)?;
+                    if tokens.peek().unwrap().kind == TokKind::RightBracket {
+                        break;
                     }
+                    tokens.expect(TokKind::Comma)?;
+                    item_nodes.push(node);
+                }
 
-                    // `if cond -> body` desugars to `if cond { true -> body }`. Note that
-                    // in this form, there can only be one condition expression; `if a, b,
-                    // c -> body` is not legal. However, `if a | b | c -> body` is
-                    // equivalent and valid.
-                    if self.peek().kind == TokKind::BranchArrow {
-                        let arrow_tok = self.next().clone();
-                        let body = self.parse_node()?;
+                tokens.expect(TokKind::RightBracket)?;
 
-                        // comma here marks end of the ifExpr, not end of branch, so we do
-                        // not consume it here.
-                        branches.push(Node::IfBranch {
-                            target: Box::from(Node::BoolNode {
-                                payload: true,
-                                tok: arrow_tok,
-                            }),
-                            body: Rc::new(body),
-                        });
+                Ok(Node::ListNode {
+                    elems: item_nodes,
+                    tok,
+                })
+            };
+            let node = scope();
+            pre_ctr.handle_pop_case(node)
+        }
 
-                        return Ok(Node::IfExprNode {
-                            cond: Box::from(cond_node),
-                            branches,
-                            tok,
+        TokKind::LeftBrace => {
+            let scope = || -> Result<Node> {
+                pre_ctr.push_min_prec(0);
+                // empty {} is always considerd an object -- an empty block is illegal
+                if tokens.peek().unwrap().kind == TokKind::RightBrace {
+                    tokens.next(); // eat the right brace
+                    return Ok(Node::ObjectNode {
+                        entries: Vec::new(),
+                        tok,
+                    });
+                }
+
+                let first_expr = parse_node(tokens, pre_ctr)?;
+                if tokens.is_eof() {
+                    return Err(Error::Syntax(
+                        "unexpected end of input inside block or object".to_string(),
+                    ));
+                }
+
+                if tokens.peek().unwrap().kind == TokKind::Colon {
+                    // it's an object
+                    tokens.next(); // eat the coln
+                    let val_expr = parse_node(tokens, pre_ctr)?;
+                    tokens.expect(TokKind::Padding)?;
+                    let mut entries = vec![Node::ObjectEntry {
+                        key: Box::new(first_expr),
+                        val: Box::new(val_expr),
+                    }];
+
+                    while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::RightBrace {
+                        let key = parse_node(tokens, pre_ctr)?;
+                        tokens.expect(TokKind::Colon)?;
+                        let val = parse_node(tokens, pre_ctr)?;
+                        tokens.expect(TokKind::Padding)?;
+                        entries.push(Node::ObjectEntry {
+                            key: Box::new(key),
+                            val: Box::new(val),
                         });
                     }
+                    tokens.expect(TokKind::RightBrace)?;
+                    return Ok(Node::ObjectNode { entries, tok });
+                }
 
-                    self.expect(TokKind::LeftBrace)?;
+                // it's a block
+                let mut exprs = vec![first_expr];
+                tokens.expect(TokKind::Padding)?;
 
-                    while !self.is_eof() && self.peek().kind != TokKind::RightBrace {
-                        let mut targets = Vec::new();
-                        while !self.is_eof() && self.peek().kind != TokKind::BranchArrow {
-                            let target = self.parse_node()?;
-                            if self.peek().kind != TokKind::BranchArrow {
-                                self.expect(TokKind::Comma)?;
+                while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::RightBrace {
+                    let expr = parse_node(tokens, pre_ctr)?;
+                    tokens.expect(TokKind::Comma)?;
+                    exprs.push(expr)
+                }
+
+                tokens.expect(TokKind::RightBrace)?;
+                return Ok(Node::BlockNode { exprs, tok });
+            };
+            let node = scope();
+            pre_ctr.handle_pop_case(node)
+        }
+        TokKind::FnKeyword => {
+            let scope = || -> Result<Node> {
+                pre_ctr.push_min_prec(0);
+                let mut name = String::new();
+                match &tokens.peek().unwrap().kind {
+                    TokKind::Identifiers(payload) => {
+                        // optional name fn
+                        name = payload.clone();
+                        tokens.next();
+                    }
+                    _ => {}
+                }
+
+                let mut args = Vec::new();
+                let mut rest_arg = String::new();
+                if tokens.peek().unwrap().kind == TokKind::LeftParan {
+                    // optional argument list
+                    tokens.next(); // eat the leftParen
+                    while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::RightParan {
+                        match matches!(tokens.peek().unwrap().kind, TokKind::Identifiers(_)) {
+                            true => {
+                                let arg = tokens.next().unwrap();
+                                // maybe this is a rest arg
+                                if tokens.peek().unwrap().kind == TokKind::Ellipsis {
+                                    match arg.kind {
+                                        TokKind::Identifiers(payload) => {
+                                            rest_arg = payload.clone();
+                                        }
+                                        _ => {}
+                                    }
+                                    tokens.expect(TokKind::Comma)?;
+                                    break;
+                                }
+
+                                args.push(arg.get_payload());
+                                if tokens.peek().unwrap().kind == TokKind::RightParan {
+                                    break;
+                                }
+                                tokens.expect(TokKind::Comma)?;
                             }
-                            targets.push(target);
-                        }
-                        self.expect(TokKind::BranchArrow)?;
-                        let body = Rc::new(self.parse_node()?);
-                        self.expect(TokKind::Padding)?;
-
-                        // We want to support multi-target branches, but don't want to
-                        // incur the performance overhead in the interpreter/evaluator of
-                        // keeping every single target as a Go slice, when the vast
-                        // majority of targets will be single-value, which requires just a
-                        // pointer to an astNode.
-                        //
-                        // So instead of doing that, we penalize the multi-value case by
-                        // essentially considering it syntax sugar and splitting such
-                        // branches into multiple AST branches, each with one target value.
-                        for target in targets {
-                            //TODO: if target will always be a single value then we can remove this loop
-                            branches.push(Node::IfBranch {
-                                target: Box::new(target),
-                                body: body.clone(),
-                            })
+                            false => {
+                                tokens.expect(TokKind::Underscore)?;
+                                args.push("".to_string());
+                                tokens.expect(TokKind::Comma)?;
+                                continue;
+                            }
                         }
                     }
-                    self.expect(TokKind::RightBrace)?;
-                    Ok(Node::IfExprNode {
+                    tokens.expect(TokKind::RightParan)?;
+                }
+
+                let mut body = parse_node(tokens, pre_ctr)?;
+
+                // Exception to the "{} is empty object" rule is that `fn {}` parses as
+                // a function with an empty block as a bod
+                body = match body {
+                    Node::ObjectNode { entries, tok, .. } if entries.is_empty() => {
+                        Node::BlockNode {
+                            exprs: Vec::new(),
+                            tok,
+                        }
+                    }
+                    _ => body,
+                };
+
+                Ok(Node::FnNode {
+                    name,
+                    args,
+                    rest_arg,
+                    body: Box::new(body),
+                    tok,
+                })
+            };
+            let node = scope();
+            pre_ctr.handle_pop_case(node)
+        }
+        TokKind::Underscore => Ok(Node::EmptyNode { tok }),
+        TokKind::Identifiers(payload) => Ok(Node::IdentifierNode {
+            payload: payload.clone(),
+            tok,
+        }),
+        TokKind::Minus | TokKind::Exclam => {
+            let right = parse_sub_node(tokens, pre_ctr)?;
+
+            Ok(Node::UnaryNode {
+                right: Box::new(right),
+                tok,
+            })
+        }
+        TokKind::IfKeyword => {
+            let scope = || -> Result<Node> {
+                pre_ctr.push_min_prec(0);
+
+                let cond_node: Node;
+                let mut branches = Vec::new();
+
+                // if no explicit condition is provided (i.e. if the keyword is
+                // followed by a { ... }), we assume the condition is "true" to allow
+                // for the useful `if { case, case ... }` pattern.
+
+                if tokens.peek().unwrap().kind == TokKind::LeftBrace {
+                    cond_node = Node::BoolNode {
+                        payload: true,
+                        tok: tok.clone(),
+                    }
+                } else {
+                    cond_node = parse_node(tokens, pre_ctr)?;
+                }
+
+                // `if cond -> body` desugars to `if cond { true -> body }`. Note that
+                // in this form, there can only be one condition expression; `if a, b,
+                // c -> body` is not legal. However, `if a | b | c -> body` is
+                // equivalent and valid.
+                if tokens.peek().unwrap().kind == TokKind::BranchArrow {
+                    let arrow_tok = tokens.next().unwrap();
+                    let body = parse_node(tokens, pre_ctr)?;
+
+                    // comma here marks end of the ifExpr, not end of branch, so we do
+                    // not consume it here.
+                    branches.push(Node::IfBranch {
+                        target: Box::from(Node::BoolNode {
+                            payload: true,
+                            tok: arrow_tok,
+                        }),
+                        body: Rc::new(body),
+                    });
+
+                    return Ok(Node::IfExprNode {
                         cond: Box::from(cond_node),
                         branches,
                         tok,
-                    })
-                };
-                let temp_node = scope();
-                self.handle_pop_case(temp_node)
-            }
-            TokKind::WithKeyword => {
-                let mut scope = || -> Result<Node> {
-                    self.push_min_prec(0);
-                    let mut with_expr_base = self.parse_node()?;
+                    });
+                }
 
-                    match &mut with_expr_base {
-                        Node::FnCalNode { args, .. } => {
-                            let with_expr_last_arg = self.parse_node()?;
-                            args.push(with_expr_last_arg);
-                            Ok(with_expr_base)
+                tokens.expect(TokKind::LeftBrace)?;
+
+                while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::RightBrace {
+                    let mut targets = Vec::new();
+                    while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::BranchArrow {
+                        let target = parse_node(tokens, pre_ctr)?;
+                        if tokens.peek().unwrap().kind != TokKind::BranchArrow {
+                            tokens.expect(TokKind::Comma)?;
                         }
-                        _ => Err(Error::Syntax(format!(
-                            "expected function call after with, got {}",
-                            with_expr_base
-                        ))),
+                        targets.push(target);
                     }
-                };
-                let temp_node = scope();
-                self.handle_pop_case(temp_node)
-            }
-            TokKind::LeftParan => {
-                let scope = || -> Result<Node> {
-                    self.push_min_prec(0);
-                    let mut exprs = Vec::new();
+                    tokens.expect(TokKind::BranchArrow)?;
+                    let body = Rc::new(parse_node(tokens, pre_ctr)?);
+                    tokens.expect(TokKind::Padding)?;
 
-                    while !self.is_eof() && self.peek().kind != TokKind::RightParan {
-                        let expr = self.parse_node()?;
-                        self.expect(TokKind::Comma)?;
-                        exprs.push(expr);
+                    // We want to support multi-target branches, but don't want to
+                    // incur the performance overhead in the interpreter/evaluator of
+                    // keeping every single target as a Go slice, when the vast
+                    // majority of targets will be single-value, which requires just a
+                    // pointer to an astNode.
+                    //
+                    // So instead of doing that, we penalize the multi-value case by
+                    // essentially considering it syntax sugar and splitting such
+                    // branches into multiple AST branches, each with one target value.
+                    for target in targets {
+                        //TODO: if target will always be a single value then we can remove this loop
+                        branches.push(Node::IfBranch {
+                            target: Box::new(target),
+                            body: body.clone(),
+                        })
                     }
-
-                    self.expect(TokKind::RightParan)?;
-                    // TODO: If only one body expr and body expr is identifier or literal,
-                    // unwrap the blockNode and just return the bare child
-
-                    Ok(Node::BlockNode { exprs, tok })
-                };
-                let temp_node = scope();
-                self.handle_pop_case(temp_node)
-            }
-            _ => Err(Error::Syntax(
-                format_args!("unexpected token {tok} at start of unit").to_string(),
-            )),
+                }
+                tokens.expect(TokKind::RightBrace)?;
+                Ok(Node::IfExprNode {
+                    cond: Box::from(cond_node),
+                    branches,
+                    tok,
+                })
+            };
+            let node = scope();
+            pre_ctr.handle_pop_case(node)
         }
+        TokKind::WithKeyword => {
+            let mut scope = || -> Result<Node> {
+                pre_ctr.push_min_prec(0);
+                let mut with_expr_base = parse_node(tokens, pre_ctr)?;
+
+                match &mut with_expr_base {
+                    Node::FnCalNode { args, .. } => {
+                        let with_expr_last_arg = parse_node(tokens, pre_ctr)?;
+                        args.push(with_expr_last_arg);
+                        Ok(with_expr_base)
+                    }
+                    _ => Err(Error::Syntax(format!(
+                        "expected function call after with, got {}",
+                        with_expr_base
+                    ))),
+                }
+            };
+            let node = scope();
+            pre_ctr.handle_pop_case(node)
+        }
+        TokKind::LeftParan => {
+            let scope = || -> Result<Node> {
+                pre_ctr.push_min_prec(0);
+                let mut exprs = Vec::new();
+
+                while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::RightParan {
+                    let expr = parse_node(tokens, pre_ctr)?;
+                    tokens.expect(TokKind::Comma)?;
+                    exprs.push(expr);
+                }
+
+                tokens.expect(TokKind::RightParan)?;
+                // TODO: If only one body expr and body expr is identifier or literal,
+                // unwrap the blockNode and just return the bare child
+
+                Ok(Node::BlockNode { exprs, tok })
+            };
+            let node = scope();
+            pre_ctr.handle_pop_case(node)
+        }
+        _ => Err(Error::Syntax(
+            format_args!("unexpected token {tok} at start of unit").to_string(),
+        )),
     }
 }
 
 // concrete AstNode parse functions
-impl Parser {
-    fn parse_assignment(&mut self, left: Node) -> Result<Node> {
-        if self.peek().kind != TokKind::Assign && self.peek().kind != TokKind::NonlocalAssign {
-            return Ok(left);
-        }
-
-        let next = self.next().clone();
-        let mut node = Node::AssignmentNode {
-            is_local: next.kind == TokKind::Assign,
-            left: Box::new(left),
-            right: None,
-            tok: next,
-        };
-
-        match &mut node {
-            Node::AssignmentNode { right, .. } => *right = Some(Box::new(self.parse_node()?)),
-            _ => {}
-        }
-
-        Ok(node)
+fn parse_assignment(
+    tokens: &mut Peekable<IntoIter<Token>>,
+    left: Node,
+    pre_ctr: &mut Precedence,
+) -> Result<Node> {
+    if tokens.peek().unwrap().kind != TokKind::Assign
+        && tokens.peek().unwrap().kind != TokKind::NonlocalAssign
+    {
+        return Ok(left);
     }
 
-    fn parse_sub_node(&mut self) -> Result<Node> {
-        let mut scope = || -> Result<Node> {
-            self.push_min_prec(0);
+    let next = tokens.next().unwrap();
+    let mut node = Node::AssignmentNode {
+        is_local: next.kind == TokKind::Assign,
+        left: Box::new(left),
+        right: None,
+        tok: next,
+    };
 
-            let mut node = self.parse_unit()?;
+    match &mut node {
+        Node::AssignmentNode { right, .. } => *right = Some(Box::new(parse_node(tokens, pre_ctr)?)),
+        _ => {}
+    }
 
-            while !self.is_eof() {
-                match self.peek().kind {
-                    TokKind::Dot => {
-                        let next = self.next().clone();
-                        let right = self.parse_unit()?;
+    Ok(node)
+}
 
-                        node = Node::PropertyAccessNode {
-                            left: Box::new(node),
-                            right: Box::new(right),
-                            tok: next,
-                        }
+fn parse_sub_node(
+    tokens: &mut Peekable<IntoIter<Token>>,
+    prec_ctr: &mut Precedence,
+) -> Result<Node> {
+    let mut scope = || -> Result<Node> {
+        prec_ctr.push_min_prec(0);
+
+        let mut node = parse_unit(tokens, prec_ctr)?;
+
+        while !tokens.is_eof() {
+            match tokens.peek().unwrap().kind {
+                TokKind::Dot => {
+                    let next = tokens.next().unwrap().clone();
+                    let right = parse_unit(tokens, prec_ctr)?;
+
+                    node = Node::PropertyAccessNode {
+                        left: Box::new(node),
+                        right: Box::new(right),
+                        tok: next,
                     }
-                    TokKind::LeftParan => {
-                        let next = self.next().clone();
-                        let mut args = Vec::new();
-                        let mut rest_arg: Option<Box<Node>> = None;
-
-                        while !self.is_eof() && self.peek().kind != TokKind::RightParan {
-                            let arg = self.parse_node()?;
-                            if self.peek().kind == TokKind::Elispe {
-                                self.next(); //eat the ellipsis
-                                self.expect(TokKind::Comma)?;
-                                rest_arg = Some(Box::new(arg));
-                                break;
-                            } else {
-                                args.push(arg)
-                            }
-
-                            if self.peek().kind == TokKind::RightParan {
-                                break;
-                            } else if self.peek().kind == TokKind::Padding {
-                                self.expect(TokKind::Padding)?;
-                                continue;
-                            } else {
-                                self.expect(TokKind::Comma)?;
-                            }
-                        }
-                        self.expect(TokKind::RightParan)?;
-
-                        node = Node::FnCalNode {
-                            r#fn: Box::new(node),
-                            args,
-                            rest_arg,
-                            tok: next,
-                        }
-                    }
-                    _ => return Ok(node),
                 }
-            }
+                TokKind::LeftParan => {
+                    let next = tokens.next().unwrap().clone();
+                    let mut args = Vec::new();
+                    let mut rest_arg: Option<Box<Node>> = None;
 
-            Ok(node)
-        };
-        let temp_node = scope();
-        self.handle_pop_case(temp_node)
-    }
-
-    fn parse_node(&mut self) -> Result<Node> {
-        let mut node = self.parse_sub_node()?;
-
-        while !self.is_eof() && self.peek().kind != TokKind::Padding {
-            match self.peek().kind {
-                // whatever follows an assignment expr cannot bind to the
-                // assignment expression itself by syntax rule, so we simply return
-                TokKind::Assign | TokKind::NonlocalAssign => return self.parse_assignment(node),
-
-                TokKind::Plus
-                | TokKind::Minus
-                | TokKind::Times
-                | TokKind::Divide
-                | TokKind::Modulus
-                | TokKind::Xor
-                | TokKind::And
-                | TokKind::Or
-                | TokKind::PushArrow
-                | TokKind::Greater
-                | TokKind::Less
-                | TokKind::Eq
-                | TokKind::Geq
-                | TokKind::Leq
-                | TokKind::Neq => {
-                    // this case implements a mini Pratt parser threaded through the
-                    // larger Oak syntax parser, using the parser struct itself to keep
-                    // track of the power / precedence stack since other forms may be
-                    // parsed in between, as in 1 + f(g(x := y)) + 2
-                    let min_prec = self.last_min_prec();
-
-                    loop {
-                        if self.is_eof() {
-                            return Err(Error::Syntax("Incomplete binary expression".to_string()));
-                        }
-
-                        let peeked = self.peek().clone();
-                        let prec = Parser::infix_op_precedence(&peeked.kind);
-                        if prec <= min_prec {
+                    while !tokens.is_eof() && tokens.peek().unwrap().kind != TokKind::RightParan {
+                        let arg = parse_node(tokens, prec_ctr)?;
+                        if tokens.peek().unwrap().kind == TokKind::Ellipsis {
+                            tokens.next(); //eat the ellipsis
+                            tokens.expect(TokKind::Comma)?;
+                            rest_arg = Some(Box::new(arg));
                             break;
+                        } else {
+                            args.push(arg)
                         }
-                        self.next(); // eat the operator
-                        if self.is_eof() {
-                            return Err(Error::Syntax(format!(
-                                "Incomplete binary expression with {}",
-                                peeked.kind
-                            )));
-                        }
-                        self.push_min_prec(prec);
-                        let right = self.parse_node()?;
-                        self.pop_min_prec();
 
-                        node = Node::BinaryNode {
-                            left: Box::new(node),
-                            right: Box::new(right),
-                            tok: peeked,
+                        if tokens.peek().unwrap().kind == TokKind::RightParan {
+                            break;
+                        } else if tokens.peek().unwrap().kind == TokKind::Padding {
+                            tokens.expect(TokKind::Padding)?;
+                            continue;
+                        } else {
+                            tokens.expect(TokKind::Comma)?;
                         }
                     }
-                    // whatever follows a binary expr cannot bind to the binary
-                    // expression by syntax rule, so we simply return
-                    return Ok(node);
-                }
-                TokKind::PipeArrow => {
-                    let pos = self.next().pos.clone(); // eat the pipe
-                    let mut pipe_right = self.parse_sub_node()?;
-                    match &mut pipe_right {
-                        Node::FnCalNode { args, .. } => {
-                            args.insert(0, node);
-                            node = pipe_right;
-                        }
-                        _ => {
-                            return Err(Error::Syntax(format!(
-                                "Expected function call after |>, got {}",
-                                pipe_right
-                            )))
-                        }
+                    tokens.expect(TokKind::RightParan)?;
+
+                    node = Node::FnCalNode {
+                        r#fn: Box::new(node),
+                        args,
+                        rest_arg,
+                        tok: next,
                     }
                 }
                 _ => return Ok(node),
             }
         }
-        // the trailing comma is handled as necessary in callers of parseNode
-        return Ok(node);
-    }
 
-    pub fn parse(mut self) -> Result<Vec<Node>> {
-        let mut nodes = Vec::new();
+        Ok(node)
+    };
+    let node = scope();
+    prec_ctr.handle_pop_case(node)
+}
 
-        while !self.is_eof() {
-            let node = self.parse_node()?;
-            println!("node: {:?}", node);
-            self.expect(TokKind::Padding)?;
-            nodes.push(node);
+fn parse_node(tokens: &mut Peekable<IntoIter<Token>>, prec_ctr: &mut Precedence) -> Result<Node> {
+    let mut node = parse_sub_node(tokens, prec_ctr)?;
+
+    while !tokens.is_eof() && !tokens.has_padding() {
+        match tokens.peek().unwrap().kind {
+            // whatever follows an assignment expr cannot bind to the
+            // assignment expression itself by syntax rule, so we simply return
+            TokKind::Assign | TokKind::NonlocalAssign => {
+                return parse_assignment(tokens, node, prec_ctr)
+            }
+
+            TokKind::Plus
+            | TokKind::Minus
+            | TokKind::Times
+            | TokKind::Divide
+            | TokKind::Modulus
+            | TokKind::Xor
+            | TokKind::And
+            | TokKind::Or
+            | TokKind::PushArrow
+            | TokKind::Greater
+            | TokKind::Less
+            | TokKind::Eq
+            | TokKind::Geq
+            | TokKind::Leq
+            | TokKind::Neq => {
+                // this case implements a mini Pratt parser threaded through the
+                // larger Oak syntax parser, using the parser struct itself to keep
+                // track of the power / precedence stack since other forms may be
+                // parsed in between, as in 1 + f(g(x := y)) + 2
+                let min_prec = prec_ctr.last_min_prec();
+
+                loop {
+                    if tokens.is_eof() {
+                        return Err(Error::Syntax("Incomplete binary expression".to_string()));
+                    }
+
+                    let peeked = tokens.peek().unwrap().clone();
+                    let prec = Precedence::infix_op_precedence(&peeked.kind);
+                    if prec <= min_prec {
+                        break;
+                    }
+                    tokens.next(); // eat the operator
+                    if tokens.is_eof() {
+                        return Err(Error::Syntax(format!(
+                            "Incomplete binary expression with {}",
+                            peeked.kind
+                        )));
+                    }
+                    prec_ctr.push_min_prec(prec);
+                    let right = parse_node(tokens, prec_ctr)?;
+                    prec_ctr.pop_min_prec();
+
+                    node = Node::BinaryNode {
+                        left: Box::new(node),
+                        right: Box::new(right),
+                        tok: peeked,
+                    }
+                }
+                // whatever follows a binary expr cannot bind to the binary
+                // expression by syntax rule, so we simply return
+                return Ok(node);
+            }
+            TokKind::PipeArrow => {
+                let pos = tokens.next().unwrap().pos.clone(); // eat the pipe
+                let mut pipe_right = parse_sub_node(tokens, prec_ctr)?;
+                match &mut pipe_right {
+                    Node::FnCalNode { args, .. } => {
+                        args.insert(0, node);
+                        node = pipe_right;
+                    }
+                    _ => {
+                        return Err(Error::Syntax(format!(
+                            "Expected function call after |>, got {} as {pos}",
+                            pipe_right
+                        )))
+                    }
+                }
+            }
+            _ => return Ok(node),
         }
-
-        Ok(nodes)
     }
+    // the trailing comma is handled as necessary in callers of parseNode
+    Ok(node)
+}
+
+pub fn parse(tokens: Vec<Token>) -> Result<Vec<Node>> {
+    let mut nodes = Vec::new();
+    let mut prec_ctr = Precedence::new();
+    let mut tokens = tokens.into_iter().peekable();
+
+    while !tokens.is_eof() {
+        let node = parse_node(&mut tokens, &mut prec_ctr)?;
+        tokens.expect(TokKind::Padding)?;
+        nodes.push(node);
+    }
+
+    Ok(nodes)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::parser::parser::parse;
     use crate::{
         lexer::token::{Pos, TokKind, Token},
-        parser,
+        lexer::tokenizer::tokenize,
     };
+
+    #[test]
+    fn test_parser_with_integration_with_tokenizer() {
+        let source_string: &[u8] = b"
+            std := import('std')
+
+            fn fizzbuzz(n) if [n % 3, n % 5] {
+                [0, 0] -> 'FizzBuzz'
+                [0, _] -> 'Fizz'
+                [_, 0] -> 'Buzz'
+                _ -> string(n)
+            }
+
+            std.range(1, 101) |> std.each(fn(n) {
+                std.println(fizzbuzz(n))
+            })
+        ";
+        let mut reader = std::io::BufReader::new(source_string);
+        let input = tokenize(&mut reader, true).unwrap();
+
+        let nodes = parse(input).unwrap();
+        println!("{:?}", nodes);
+        assert_eq!(nodes.len(), 3);
+    }
+
+    #[test]
+    fn test_parser_operator_precedence() {
+        let tokens = vec![
+            TokKind::Identifiers("a".to_string()),
+            TokKind::Assign,
+            TokKind::NumberLiteral("1".to_string()),
+            TokKind::Plus,
+            TokKind::NumberLiteral("2".to_string()),
+            TokKind::Times,
+            TokKind::NumberLiteral("3".to_string()),
+            TokKind::Padding,
+        ];
+
+        let input = tokens
+            .iter()
+            .map(|t| Token {
+                kind: t.clone(),
+                pos: Pos(0, 0),
+            })
+            .collect();
+
+        let nodes = parse(input).unwrap();
+        println!("{:?}", nodes);
+        assert_eq!(nodes.len(), 1);
+    }
 
     #[test]
     fn test_parser() {
@@ -881,8 +870,7 @@ mod tests {
             })
             .collect();
 
-        let parser = parser::parser::Parser::new(input);
-        let nodes = parser.parse().unwrap();
+        let nodes = parse(input).unwrap();
         println!("{:?}", nodes);
         assert_eq!(nodes.len(), 8);
     }

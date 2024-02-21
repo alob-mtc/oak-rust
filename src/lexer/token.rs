@@ -30,7 +30,6 @@ impl Display for Token {
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum TokKind {
     // sentinel
-    Unknown,
     Comment(String),
     // language tokens
     Comma,
@@ -47,7 +46,7 @@ pub enum TokKind {
     BranchArrow,
     PushArrow,
     Colon,
-    Elispe,
+    Ellipsis,
     Qmark,
     Exclam,
     // binary operators
@@ -155,7 +154,7 @@ impl fmt::Display for TokKind {
             TokKind::BranchArrow => write!(f, "->"),
             TokKind::PushArrow => write!(f, "<<"),
             TokKind::Colon => write!(f, ":"),
-            TokKind::Elispe => write!(f, "..."),
+            TokKind::Ellipsis => write!(f, "..."),
             TokKind::Qmark => write!(f, "?"),
             TokKind::Exclam => write!(f, "!"),
             TokKind::Plus => write!(f, "+"),
@@ -182,7 +181,6 @@ impl fmt::Display for TokKind {
             TokKind::StringLiteral(payload) => write!(f, r#"string("{payload}")"#),
             TokKind::NumberLiteral(payload) => write!(f, "number({payload})",),
             TokKind::Padding => write!(f, "padding"),
-            _ => write!(f, "(unknown token)"),
         }
     }
 }

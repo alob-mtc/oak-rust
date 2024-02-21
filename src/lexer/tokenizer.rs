@@ -15,15 +15,7 @@ lazy_static! {
         Regex::new(r"^[+-]?\d+(_\d+)*(\.\d+)?$").expect("regex number pattern is valid");
 }
 
-pub struct Tokenizer {
-    source: Vec<char>,
-    index: usize,
-
-    line: usize,
-    col: usize,
-}
-
-fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>> {
+pub fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>> {
     let mut tokens = Vec::new();
 
     // read a complete line
@@ -81,7 +73,7 @@ fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>
                         buf_iter.next();
                         if let Some((_, '.')) = buf_iter.peek() {
                             buf_iter.next();
-                            commit_token(TokKind::Elispe, &mut buf_iter, false);
+                            commit_token(TokKind::Ellipsis, &mut buf_iter, false);
                         }
                     } else {
                         commit_token(TokKind::Dot, &mut buf_iter, false);
@@ -134,12 +126,16 @@ fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<Token>
                         commit_token(TokKind::Minus, &mut buf_iter, false);
                     }
                 }
+                '*' => commit_token(TokKind::Times, &mut buf_iter, false),
                 '/' => {
                     if let Some((_, '/')) = buf_iter.peek() {
                         buf_iter.next();
                         let comment_string = buf_iter
                             .clone()
-                            .map(|(_, ch)| ch)
+                            .map(|(_, ch)| {
+                                buf_iter.next();
+                                ch
+                            })
                             .collect::<String>()
                             .trim()
                             .to_string();
@@ -234,6 +230,136 @@ fn commit(tok: Token, tokens: &mut Vec<Token>, debug: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_operator_tokens() {
+        let source_string: &[u8] = b"
+        + - * / % ^ & | < > = ! : , . ... ( ) [ ] { } ? _ -> <- |> <= >=
+        ";
+        let mut reader = std::io::BufReader::new(source_string);
+        let output = tokenize(&mut reader, true)
+            .unwrap()
+            .iter()
+            .map(|tok| tok.kind.clone())
+            .collect::<Vec<TokKind>>();
+
+        let expected_output = vec![
+            TokKind::Plus,
+            TokKind::Minus,
+            TokKind::Times,
+            TokKind::Divide,
+            TokKind::Modulus,
+            TokKind::Xor,
+            TokKind::And,
+            TokKind::Or,
+            TokKind::Less,
+            TokKind::Greater,
+            TokKind::Eq,
+            TokKind::Exclam,
+            TokKind::Colon,
+            TokKind::Comma,
+            TokKind::Dot,
+            TokKind::Ellipsis,
+            TokKind::LeftParan,
+            TokKind::RightParan,
+            TokKind::LeftBracket,
+            TokKind::RightBracket,
+            TokKind::LeftBrace,
+            TokKind::RightBrace,
+            TokKind::Qmark,
+            TokKind::Underscore,
+            TokKind::BranchArrow,
+            TokKind::NonlocalAssign,
+            TokKind::PipeArrow,
+            TokKind::Leq,
+            TokKind::Geq,
+        ];
+        assert_eq!(output, expected_output);
+    }
+
+    #[test]
+    fn test_tokenize2() {
+        let souce_string: &[u8] = b"
+        std := import('std')
+
+        fn fizzbuzz(n) if [n % 3, n % 5] {
+            [0, 0] -> 'FizzBuzz'
+            [0, _] -> 'Fizz'
+            [_, 0] -> 'Buzz'
+            _ -> string(n)
+        }
+        
+        std.range(1, 101) |> std.each(fn(n) {
+            std.println(fizzbuzz(n))
+        })
+        ";
+        let mut reader = std::io::BufReader::new(souce_string);
+        let output = tokenize(&mut reader, true)
+            .unwrap()
+            .iter()
+            .map(|tok| tok.kind.clone())
+            .collect::<Vec<TokKind>>();
+        let expected_output = vec![
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("import".to_string()),
+            TokKind::LeftParan,
+            TokKind::StringLiteral("std".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::FnKeyword,
+            TokKind::Identifiers("fizzbuzz".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("n".to_string()),
+            TokKind::RightParan,
+            TokKind::IfKeyword,
+            TokKind::LeftBracket,
+            TokKind::Identifiers("n".to_string()),
+            TokKind::Modulus,
+            TokKind::NumberLiteral("3".to_string()),
+            TokKind::Comma,
+            TokKind::Identifiers("n".to_string()),
+            TokKind::Modulus,
+            TokKind::NumberLiteral("5".to_string()),
+            TokKind::RightBracket,
+            TokKind::LeftBrace,
+            TokKind::LeftBracket,
+            TokKind::NumberLiteral("0".to_string()),
+            TokKind::Comma,
+            TokKind::NumberLiteral("0".to_string()),
+            TokKind::RightBracket,
+            TokKind::BranchArrow,
+            TokKind::StringLiteral("FizzBuzz".to_string()),
+            TokKind::Padding,
+            TokKind::LeftBracket,
+            TokKind::NumberLiteral("0".to_string()),
+            TokKind::Comma,
+            TokKind::Underscore,
+            TokKind::RightBracket,
+            TokKind::BranchArrow,
+            TokKind::StringLiteral("Fizz".to_string()),
+            TokKind::Padding,
+            TokKind::LeftBracket,
+            TokKind::Underscore,
+            TokKind::Comma,
+            TokKind::NumberLiteral("0".to_string()),
+            TokKind::RightBracket,
+            TokKind::BranchArrow,
+            TokKind::StringLiteral("Buzz".to_string()),
+            TokKind::Padding,
+            TokKind::Underscore,
+            TokKind::BranchArrow,
+            TokKind::Identifiers("string".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("n".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::RightBrace,
+            TokKind::Padding,
+            TokKind::Identifiers("std".to_string()),
+        ];
+        assert_eq!(output, expected_output);
+    }
 
     #[test]
     fn test_tokenize() {
