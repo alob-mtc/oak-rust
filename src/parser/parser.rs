@@ -689,30 +689,6 @@ mod tests {
     };
 
     #[test]
-    fn test_parser_with_integration_with_tokenizer() {
-        let source_string: &[u8] = b"
-            std := import('std')
-
-            fn fizzbuzz(n) if [n % 3, n % 5] {
-                [0, 0] -> 'FizzBuzz'
-                [0, _] -> 'Fizz'
-                [_, 0] -> 'Buzz'
-                _ -> string(n)
-            }
-
-            std.range(1, 101) |> std.each(fn(n) {
-                std.println(fizzbuzz(n))
-            })
-        ";
-        let mut reader = std::io::BufReader::new(source_string);
-        let input = tokenize(&mut reader, true).unwrap();
-
-        let nodes = parse(input).unwrap();
-        println!("{:?}", nodes);
-        assert_eq!(nodes.len(), 3);
-    }
-
-    #[test]
     fn test_parser_operator_precedence() {
         let tokens = vec![
             TokKind::Identifiers("a".to_string()),
@@ -734,7 +710,6 @@ mod tests {
             .collect();
 
         let nodes = parse(input).unwrap();
-        println!("{:?}", nodes);
         assert_eq!(nodes.len(), 1);
     }
 
@@ -871,7 +846,29 @@ mod tests {
             .collect();
 
         let nodes = parse(input).unwrap();
-        println!("{:?}", nodes);
         assert_eq!(nodes.len(), 8);
+    }
+
+    #[test]
+    fn test_parser_with_integration_with_tokenizer() {
+        let source_string: &[u8] = b"
+            std := import('std')
+
+            fn fizzbuzz(n) if [n % 3, n % 5] {
+                [0, 0] -> 'FizzBuzz'
+                [0, _] -> 'Fizz'
+                [_, 0] -> 'Buzz'
+                _ -> string(n)
+            }
+
+            std.range(1, 101) |> std.each(fn(n) {
+                std.println(fizzbuzz(n))
+            })
+        ";
+        let mut reader = std::io::BufReader::new(source_string);
+        let input = tokenize(&mut reader, true).unwrap();
+
+        let nodes = parse(input).unwrap();
+        assert_eq!(nodes.len(), 3);
     }
 }

@@ -10,7 +10,7 @@ use regex::Regex;
 
 lazy_static! {
     static ref IDENTIFIER_REGEX: Regex =
-        Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("regex Identifiers pattern is valid");
+        Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*\??$").expect("regex Identifiers pattern is valid");
     static ref NUMBER_REGEX: Regex =
         Regex::new(r"^[+-]?\d+(_\d+)*(\.\d+)?$").expect("regex number pattern is valid");
 }
@@ -65,6 +65,46 @@ pub fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<To
                     }
                 };
 
+            let mut tokenize_num_ident = |ch: char, buf_iter: &mut Peekable<Enumerate<Chars>>| {
+                let mut entry = String::from(ch);
+                while let Some(&(_, c)) = buf_iter.peek() {
+                    let mut tmp_entry = String::from(entry.clone());
+                    // support http.Server()
+                    if IDENTIFIER_REGEX.is_match(&tmp_entry)
+                        && (!c.is_ascii_alphabetic() && c != '?')
+                    {
+                        break;
+                    }
+
+                    tmp_entry.push(c.clone());
+                    // Break the loop if the next character does not continue a valid number or Identifiers
+                    // and is neither a '.' nor a '_'
+                    if !NUMBER_REGEX.is_match(&tmp_entry)
+                        && !IDENTIFIER_REGEX.is_match(&tmp_entry)
+                        && (c != '.' && c != '_' && c != '?')
+                    {
+                        break;
+                    }
+
+                    // Advance the iterator and update 'entry'
+                    buf_iter.next();
+                    entry = tmp_entry;
+                }
+
+                // Determine the token type based on the final 'entry' string
+                if NUMBER_REGEX.is_match(&entry) {
+                    // Handle numeric token
+                    commit_token(
+                        TokKind::NumberLiteral(entry.replace("_", "")),
+                        buf_iter,
+                        true,
+                    );
+                } else if IDENTIFIER_REGEX.is_match(&entry) {
+                    // Handle Identifiers token
+                    commit_token(lookup_ident(&entry), buf_iter, false);
+                }
+            };
+
             match ch {
                 '\t' | '\r' | ' ' => {}
                 ',' => commit_token(TokKind::Comma, &mut buf_iter, false),
@@ -79,7 +119,13 @@ pub fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<To
                         commit_token(TokKind::Dot, &mut buf_iter, false);
                     }
                 }
-                '_' => commit_token(TokKind::Underscore, &mut buf_iter, false),
+                '_' => {
+                    if buf_iter.peek().unwrap().1.is_ascii_alphabetic() {
+                        tokenize_num_ident(ch, &mut buf_iter)
+                    } else {
+                        commit_token(TokKind::Underscore, &mut buf_iter, false);
+                    }
+                }
                 '(' => commit_token(TokKind::LeftParan, &mut buf_iter, false),
                 ')' => commit_token(TokKind::RightParan, &mut buf_iter, false),
                 '[' => commit_token(TokKind::LeftBracket, &mut buf_iter, false),
@@ -175,43 +221,7 @@ pub fn tokenize(unbuffered: &mut BufReader<&[u8]>, debug: bool) -> Result<Vec<To
                     }
                     commit_token(TokKind::StringLiteral(accumulator), &mut buf_iter, false);
                 }
-                _ => {
-                    let mut entry = String::from(ch);
-                    while let Some(&(_, c)) = buf_iter.peek() {
-                        let mut tmp_entry = String::from(entry.clone());
-                        // support http.Server()
-                        if IDENTIFIER_REGEX.is_match(&tmp_entry) && !c.is_ascii_alphabetic() {
-                            break;
-                        }
-
-                        tmp_entry.push(c.clone());
-                        // Break the loop if the next character does not continue a valid number or Identifiers
-                        // and is neither a '.' nor a '_'
-                        if !NUMBER_REGEX.is_match(&tmp_entry)
-                            && !IDENTIFIER_REGEX.is_match(&tmp_entry)
-                            && (c != '.' && c != '_')
-                        {
-                            break;
-                        }
-
-                        // Advance the iterator and update 'entry'
-                        buf_iter.next();
-                        entry = tmp_entry;
-                    }
-
-                    // Determine the token type based on the final 'entry' string
-                    if NUMBER_REGEX.is_match(&entry) {
-                        // Handle numeric token
-                        commit_token(
-                            TokKind::NumberLiteral(entry.replace("_", "")),
-                            &mut buf_iter,
-                            true,
-                        );
-                    } else if IDENTIFIER_REGEX.is_match(&entry) {
-                        // Handle Identifiers token
-                        commit_token(lookup_ident(&entry), &mut buf_iter, false);
-                    }
-                }
+                _ => tokenize_num_ident(ch, &mut buf_iter),
             }
         }
         line += 1;
@@ -357,6 +367,67 @@ mod tests {
             TokKind::RightBrace,
             TokKind::Padding,
             TokKind::Identifiers("std".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("range".to_string()),
+            TokKind::LeftParan,
+            TokKind::NumberLiteral("1".to_string()),
+            TokKind::Comma,
+            TokKind::NumberLiteral("101".to_string()),
+            TokKind::RightParan,
+            TokKind::PipeArrow,
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("each".to_string()),
+            TokKind::LeftParan,
+            TokKind::FnKeyword,
+            TokKind::LeftParan,
+            TokKind::Identifiers("n".to_string()),
+            TokKind::RightParan,
+            TokKind::LeftBrace,
+            TokKind::Identifiers("std".to_string()),
+            TokKind::Dot,
+            TokKind::Identifiers("println".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("fizzbuzz".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("n".to_string()),
+            TokKind::RightParan,
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::RightBrace,
+            TokKind::RightParan,
+            TokKind::Padding,
+        ];
+        assert_eq!(output, expected_output);
+    }
+
+    #[test]
+    fn test_tokenize3() {
+        let souce_string: &[u8] = b"        
+        leapYear? := leap?(year)
+        _maybeOpt := _call?(leapYear)
+        ";
+        let mut reader = std::io::BufReader::new(souce_string);
+        let output = tokenize(&mut reader, true)
+            .unwrap()
+            .iter()
+            .map(|tok| tok.kind.clone())
+            .collect::<Vec<TokKind>>();
+        let expected_output = vec![
+            TokKind::Identifiers("leapYear?".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("leap?".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("year".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
+            TokKind::Identifiers("_maybeOpt".to_string()),
+            TokKind::Assign,
+            TokKind::Identifiers("_call?".to_string()),
+            TokKind::LeftParan,
+            TokKind::Identifiers("leapYear".to_string()),
+            TokKind::RightParan,
+            TokKind::Padding,
         ];
         assert_eq!(output, expected_output);
     }
@@ -385,7 +456,7 @@ mod tests {
         PORT := 9999
         std.println('server listing on port:', PORT)
         server.start(PORT)
-";
+        ";
 
         let mut reader = std::io::BufReader::new(source_string);
         let output = tokenize(&mut reader, true)
