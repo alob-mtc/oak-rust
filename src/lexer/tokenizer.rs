@@ -456,7 +456,7 @@ mod tests {
         PORT := 9999
         std.println('server listing on port:', PORT)
         server.start(PORT)
-";
+        ";
 
         let mut reader = std::io::BufReader::new(source_string);
         let output = tokenize(&mut reader, true)
